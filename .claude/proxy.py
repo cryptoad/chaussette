@@ -245,24 +245,6 @@ def do_connect_and_probe(proxy, target_ip, target_port, timeout=DEFAULT_TIMEOUT,
 
     probe_detail_parts.append("no initial banner")
 
-    # 2) send short ASCII probe
-    try:
-        sock.settimeout(timeout)
-        sock.sendall(b"HELLO\r\n")
-    except Exception as e:
-        return finish_and_close("CLOSED", f"error sending ascii probe: {e}")
-
-    r2 = read_some(sock, timeout=0.6)
-    if isinstance(r2, Exception):
-        return finish_and_close("CLOSED", f"socket error after ascii probe: {r2}")
-    if r2 == b"":
-        return finish_and_close("CLOSED", "peer closed connection after ascii probe")
-    if r2:
-        snippet = (r2[:200]).decode("latin-1", errors="replace")
-        return finish_and_close("OPEN", f"got reply to ascii probe ({len(r2)} bytes): {snippet!r}")
-
-    probe_detail_parts.append("no reply to ascii probe")
-
     # 3) send an HTTP-style probe (may trigger HTTP servers)
     try:
         sock.settimeout(timeout)
@@ -284,6 +266,24 @@ def do_connect_and_probe(proxy, target_ip, target_port, timeout=DEFAULT_TIMEOUT,
             return finish_and_close("OPEN", f"Received {len(r3)} bytes after HTTP probe")
 
     probe_detail_parts.append("no HTTP-like reply")
+
+    # 2) send short ASCII probe
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(b"HELLO\r\n")
+    except Exception as e:
+        return finish_and_close("CLOSED", f"error sending ascii probe: {e}")
+
+    r2 = read_some(sock, timeout=0.6)
+    if isinstance(r2, Exception):
+        return finish_and_close("CLOSED", f"socket error after ascii probe: {r2}")
+    if r2 == b"":
+        return finish_and_close("CLOSED", "peer closed connection after ascii probe")
+    if r2:
+        snippet = (r2[:200]).decode("latin-1", errors="replace")
+        return finish_and_close("OPEN", f"got reply to ascii probe ({len(r2)} bytes): {snippet!r}")
+
+    probe_detail_parts.append("no reply to ascii probe")
 
     # 4) optional TLS handshake probe (if requested by caller)
     if try_tls:
