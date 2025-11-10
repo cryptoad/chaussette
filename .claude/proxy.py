@@ -27,7 +27,7 @@ def parse_proxy_env(explicit=None):
     host = p.hostname
     port = p.port or (443 if scheme == "https" else 80)
     auth = None
-    if p.username:
+    if False and p.username:
         creds = f"{urllib.parse.unquote(p.username)}:{urllib.parse.unquote(p.password or '')}"
         auth = "Basic " + base64.b64encode(creds.encode()).decode()
     return scheme, host, port, auth
