@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-scan_proxy_subnet_connect.py
+scan_proxy_subnet_ws_all.py
 
 Scan odd IPs in the /24 of the proxy IP (from HTTP_PROXY). For each odd IP O:
   - attempt TCP connect to O:proxy_port
   - if connect succeeds, attempt "CONNECT E:2024" where E = O - 1 (even previous IP)
-  - if CONNECT returns 2xx, send "TEST\r\n\r\n" through the tunnel, read a small reply,
-    print the result and exit.
+  - if CONNECT returns 2xx, attempt a WebSocket handshake over the tunnel:
+      * send WebSocket opening GET with Sec-WebSocket-Key
+      * validate Sec-WebSocket-Accept
+      * if accepted, send a masked "TEST" text frame and read one reply frame
+  - print result for each odd IP (do NOT stop on first success)
+  - prints summary at the end
 
 Usage:
-  python3 scan_proxy_subnet_connect.py
-  python3 scan_proxy_subnet_connect.py --proxy http://user:pass@1.2.3.4:3128 -t 3
-
-Notes:
- - Honours HTTP_PROXY / http_proxy (or --proxy override). Does NOT consult NO_PROXY.
- - Supports http and https proxies (will TLS to the proxy host if scheme is https).
- - Stops after first successful CONNECT+TEST attempt (even if the target gives no response),
-   as requested.
+  python3 scan_proxy_subnet_ws_all.py
+  python3 scan_proxy_subnet_ws_all.py --proxy http://user:pass@1.2.3.4:3128 -t 3
 """
 
 from __future__ import annotations
@@ -27,20 +25,16 @@ import urllib.parse
 import base64
 import argparse
 import time
+import hashlib
 import struct
-import fcntl
-
-# For reading local interface if needed (not strictly necessary here)
-SIOCGIFADDR = 0x8915
+import random
 
 DEFAULT_TIMEOUT = 3.0
-TEST_PAYLOAD = b"TEST\r\n\r\n"
-READ_LIMIT = 4096
+TEST_PAYLOAD = b"TEST"
+READ_LIMIT = 8192
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 def parse_proxy_env(explicit: str | None = None):
-    """Parse HTTP_PROXY / http_proxy or an explicit proxy string.
-    Returns (scheme, host, port, proxy_auth_header_or_None).
-    """
     val = explicit or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
     if not val:
         return None
@@ -60,9 +54,7 @@ def parse_proxy_env(explicit: str | None = None):
     return scheme, host, port, auth
 
 def resolve_to_ipv4(host: str) -> str | None:
-    """Resolve hostname to the first IPv4 string, or return host if already IPv4."""
     try:
-        # quick check if already IPv4 dotted
         parts = host.split(".")
         if len(parts) == 4 and all(0 <= int(p) < 256 for p in parts):
             return host
@@ -79,33 +71,26 @@ def resolve_to_ipv4(host: str) -> str | None:
 def ip_to_octets(ip: str):
     return [int(x) for x in ip.split(".")]
 
-def octets_to_ip(o):
-    return ".".join(str(x) for x in o)
-
 def iter_odd_ips_in_24(base_ip: str):
-    """Yield odd host IPs in the /24 of base_ip (1..254, last octet odd)."""
     a,b,c,d = ip_to_octets(base_ip)
     for host in range(1, 255):
         if host % 2 == 1:
             yield f"{a}.{b}.{c}.{host}"
 
 def tcp_connect(addr: str, port: int, timeout: float):
-    """Try to open TCP socket to addr:port. Return (sock, errstr) where sock is a connected socket or None."""
     try:
         s = socket.create_connection((addr, port), timeout=timeout)
         return s, None
     except Exception as e:
         return None, str(e)
 
-def wrap_tls_if_needed(sock: socket.socket, scheme: str, server_hostname: str):
-    """If scheme == 'https', wrap socket in TLS. Return wrapped socket or raise."""
+def wrap_tls_if_needed(sock: socket.socket, scheme: str, server_hostname: str | None):
     if scheme != "https":
         return sock
     ctx = ssl.create_default_context()
     return ctx.wrap_socket(sock, server_hostname=server_hostname)
 
-def read_headers(sock: socket.socket, timeout: float):
-    """Read until CRLFCRLF or timeout and return the bytes read (may be partial)."""
+def read_until_double_crlf(sock: socket.socket, timeout: float):
     sock.settimeout(timeout)
     buf = b""
     try:
@@ -114,32 +99,85 @@ def read_headers(sock: socket.socket, timeout: float):
             if not chunk:
                 break
             buf += chunk
-            if len(buf) > 16*1024:
+            if len(buf) > 16384:
                 break
-    except socket.timeout:
+    except Exception:
         pass
-    except Exception as e:
-        return None, f"read error: {e}"
-    return buf, None
+    return buf
 
-def parse_status_line_from_head(head: bytes) -> (int | None, str):
+def parse_status_line(head: bytes):
     if not head:
         return None, ""
-    try:
-        first = head.split(b"\r\n",1)[0].decode(errors="replace")
-        parts = first.split()
-        status = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
-        return status, first
-    except Exception:
-        return None, head.split(b"\r\n",1)[0].decode(errors="replace")
+    first = head.split(b"\r\n",1)[0].decode(errors="replace")
+    parts = first.split()
+    code = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
+    return code, first
 
-def attempt_connect_then_proxy_connect(odd_ip: str, proxy_port: int, scheme: str, proxy_auth: str | None, timeout: float):
+def ws_make_key() -> str:
+    key = os.urandom(16)
+    return base64.b64encode(key).decode()
+
+def ws_expected_accept(key: str) -> str:
+    tohash = (key + WS_GUID).encode("utf-8")
+    h = hashlib.sha1(tohash).digest()
+    return base64.b64encode(h).decode()
+
+def ws_build_masked_text_frame(payload: bytes) -> bytes:
+    fin_and_opcode = 0x81  # FIN=1, opcode=1 (text)
+    length = len(payload)
+    if length < 126:
+        pl_header = struct.pack("!B", 0x80 | length)
+    elif length < (1<<16):
+        pl_header = struct.pack("!BH", 0x80 | 126, length)
+    else:
+        pl_header = struct.pack("!BQ", 0x80 | 127, length)
+    mask = os.urandom(4)
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return bytes([fin_and_opcode]) + pl_header + mask + masked
+
+def ws_read_frame(sock: socket.socket, timeout: float):
+    sock.settimeout(timeout)
+    try:
+        h = sock.recv(2)
+        if not h or len(h) < 2:
+            return None, "no data / closed"
+        b1, b2 = h[0], h[1]
+        opcode = b1 & 0x0f
+        masked = (b2 >> 7) & 1
+        plen = b2 & 0x7f
+        if plen == 126:
+            ext = sock.recv(2)
+            if len(ext) < 2:
+                return None, "incomplete extended len"
+            plen = struct.unpack("!H", ext)[0]
+        elif plen == 127:
+            ext = sock.recv(8)
+            if len(ext) < 8:
+                return None, "incomplete extended len"
+            plen = struct.unpack("!Q", ext)[0]
+        mask_key = b""
+        if masked:
+            mask_key = sock.recv(4)
+            if len(mask_key) < 4:
+                return None, "incomplete mask key"
+        payload = b""
+        toread = plen
+        while toread:
+            chunk = sock.recv(min(4096, toread))
+            if not chunk:
+                break
+            payload += chunk
+            toread -= len(chunk)
+        if masked and mask_key:
+            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+        return opcode, payload
+    except Exception as e:
+        return None, f"read error: {e}"
+
+def attempt_connect_then_ws(odd_ip: str, proxy_port: int, scheme: str, proxy_auth: str | None, timeout: float):
     """
-    Connect to odd_ip:proxy_port, then send CONNECT to even_ip:2024.
-    Returns dict with keys:
-      - odd_ip, even_ip, tcp_connect_err (if any),
-      - connect_response_status (int or None), connect_response_line,
-      - probe_sent (bool), probe_response (bytes or None), probe_err (str or None)
+    Connect to odd_ip:proxy_port, send CONNECT to even_ip:2024, if 2xx then attempt WebSocket handshake
+    and a single masked TEXT frame exchange. Return a dict of results.
     """
     res = {
         "odd_ip": odd_ip,
@@ -147,32 +185,31 @@ def attempt_connect_then_proxy_connect(odd_ip: str, proxy_port: int, scheme: str
         "tcp_connect_err": None,
         "connect_status": None,
         "connect_line": None,
-        "connect_head_raw": None,
-        "probe_sent": False,
-        "probe_response": None,
-        "probe_err": None,
+        "ws_handshake_ok": False,
+        "ws_reason": None,
+        "ws_reply": None,
     }
 
-    # compute even IP (previous)
+    # compute even IP
     try:
         a,b,c,d = ip_to_octets(odd_ip)
-        even_host = d - 1
-        if even_host < 1 or even_host > 254:
-            res["tcp_connect_err"] = f"computed even host {even_host} out of range"
+        even = d - 1
+        if even < 1 or even > 254:
+            res["tcp_connect_err"] = f"even host {even} out of range"
             return res
-        even_ip = f"{a}.{b}.{c}.{even_host}"
+        even_ip = f"{a}.{b}.{c}.{even}"
         res["even_ip"] = even_ip
     except Exception as e:
         res["tcp_connect_err"] = f"ip math error: {e}"
         return res
 
-    # 1) TCP connect to odd_ip:proxy_port
+    # TCP connect to odd_ip:proxy_port
     sock, err = tcp_connect(odd_ip, proxy_port, timeout)
     if not sock:
         res["tcp_connect_err"] = err
         return res
 
-    # wrap TLS to proxy if scheme==https
+    # TLS to proxy if needed
     try:
         sock = wrap_tls_if_needed(sock, scheme, server_hostname=odd_ip if scheme=="https" else None)
     except Exception as e:
@@ -183,7 +220,7 @@ def attempt_connect_then_proxy_connect(odd_ip: str, proxy_port: int, scheme: str
         res["tcp_connect_err"] = f"TLS wrap failed: {e}"
         return res
 
-    # 2) send CONNECT even_ip:2024
+    # send CONNECT even_ip:2024
     connect_req = f"CONNECT {res['even_ip']}:2024 HTTP/1.1\r\nHost: {res['even_ip']}:2024\r\n"
     if proxy_auth:
         connect_req += f"Proxy-Authorization: {proxy_auth}\r\n"
@@ -199,144 +236,186 @@ def attempt_connect_then_proxy_connect(odd_ip: str, proxy_port: int, scheme: str
         res["tcp_connect_err"] = f"failed to send CONNECT: {e}"
         return res
 
-    # 3) read proxy response headers
-    head, read_err = read_headers(sock, timeout=timeout)
-    if read_err:
-        try:
-            sock.close()
-        except Exception:
-            pass
-        res["tcp_connect_err"] = read_err
-        return res
-
-    res["connect_head_raw"] = head
-    status, first_line = parse_status_line_from_head(head)
-    res["connect_status"] = status
+    # read proxy response
+    head = read_until_double_crlf(sock, timeout)
+    code, first_line = parse_status_line(head)
+    res["connect_status"] = code
     res["connect_line"] = first_line
-
-    if status is None:
-        # no numeric status — could be empty (no headers) or unparsable
-        # treat as failure and close
+    if code is None or not (200 <= code < 300):
         try:
             sock.close()
         except Exception:
             pass
         return res
 
-    if not (200 <= status < 300):
-        # CONNECT not successful; close and continue scanning
-        try:
-            sock.close()
-        except Exception:
-            pass
-        return res
-
-    # 4) CONNECT succeeded (200): send TEST payload and read reply
+    # CONNECT succeeded: attempt WebSocket handshake
+    ws_key = ws_make_key()
+    expected_accept = ws_expected_accept(ws_key)
+    req_lines = [
+        f"GET / HTTP/1.1",
+        f"Host: {res['even_ip']}:2024",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Key: {ws_key}",
+        "Sec-WebSocket-Version: 13",
+        "User-Agent: proxy-ws-scan/1.0",
+        "",
+        ""
+    ]
+    hs_req = "\r\n".join(req_lines).encode()
     try:
         sock.settimeout(timeout)
-        sock.sendall(TEST_PAYLOAD)
-        res["probe_sent"] = True
+        sock.sendall(hs_req)
     except Exception as e:
-        res["probe_err"] = f"failed to send probe payload: {e}"
+        res["ws_reason"] = f"failed to send WS handshake: {e}"
         try:
             sock.close()
         except Exception:
             pass
         return res
 
-    # read small reply
+    head2 = read_until_double_crlf(sock, timeout)
+    if not head2:
+        res["ws_reason"] = "no handshake response"
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return res
+
+    code2, first2 = parse_status_line(head2)
+    if code2 != 101:
+        res["ws_reason"] = f"handshake failed, status: {first2!s}"
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return res
+
+    # validate Sec-WebSocket-Accept
     try:
+        hdr_text = head2.decode(errors="replace")
+        accept_val = None
+        for line in hdr_text.split("\r\n")[1:]:
+            if ":" not in line:
+                continue
+            k,v = line.split(":",1)
+            if k.strip().lower() == "sec-websocket-accept":
+                accept_val = v.strip()
+                break
+        if accept_val != expected_accept:
+            res["ws_reason"] = f"accept mismatch: got {accept_val!r} expected {expected_accept!r}"
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return res
+    except Exception as e:
+        res["ws_reason"] = f"error parsing handshake headers: {e}"
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return res
+
+    # handshake OK
+    res["ws_handshake_ok"] = True
+
+    # send masked text frame "TEST"
+    try:
+        frame = ws_build_masked_text_frame(TEST_PAYLOAD)
         sock.settimeout(timeout)
-        data = sock.recv(READ_LIMIT)
-        if data == b"":
-            # peer closed
-            res["probe_response"] = b""
+        sock.sendall(frame)
+    except Exception as e:
+        res["ws_reason"] = f"failed to send WS frame: {e}"
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return res
+
+    # read one frame back
+    op_payload = ws_read_frame(sock, timeout)
+    if op_payload is None:
+        res["ws_reason"] = "no ws frame / read error"
+    else:
+        op, payload_or_err = op_payload
+        if op is None:
+            res["ws_reason"] = f"ws read error: {payload_or_err}"
         else:
-            res["probe_response"] = data
-    except socket.timeout:
-        # no data in timeout
-        res["probe_response"] = None
-    except Exception as e:
-        res["probe_err"] = f"read after probe failed: {e}"
-    finally:
-        try:
-            sock.close()
-        except Exception:
-            pass
+            res["ws_reply"] = payload_or_err
+
+    try:
+        sock.close()
+    except Exception:
+        pass
 
     return res
 
 def main():
-    parser = argparse.ArgumentParser(description="Scan odd IPs in /24 of proxy IP and try CONNECT to preceding even IP:2024 then send TEST.")
-    parser.add_argument("--proxy", help="explicit proxy URL to use (overrides HTTP_PROXY env)")
-    parser.add_argument("-t", "--timeout", type=float, default=DEFAULT_TIMEOUT, help="per-operation timeout seconds")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Scan odd IPs in proxy IP /24; attempt WebSocket handshake after successful CONNECT and report for all hosts.")
+    ap.add_argument("--proxy", help="explicit proxy URL")
+    ap.add_argument("-t", "--timeout", type=float, default=DEFAULT_TIMEOUT, help="timeout seconds")
+    args = ap.parse_args()
 
     proxy = parse_proxy_env(args.proxy)
     if not proxy:
-        print("HTTP_PROXY or http_proxy not set (or use --proxy). Exiting.")
+        print("HTTP_PROXY/http_proxy not set and --proxy not supplied. Exiting.")
         return
     scheme, proxy_host, proxy_port, proxy_auth = proxy
-    print(f"Using proxy setting: {scheme}://{proxy_host}:{proxy_port} {'(auth)' if proxy_auth else ''}")
+    print(f"Using proxy: {scheme}://{proxy_host}:{proxy_port} {'(auth)' if proxy_auth else ''}")
 
-    # resolve proxy_host to IPv4
     proxy_ip = resolve_to_ipv4(proxy_host)
     if not proxy_ip:
         print(f"Could not resolve proxy host {proxy_host} to IPv4. Exiting.")
         return
-    print(f"Proxy resolved to IPv4: {proxy_ip}; scanning its /24 odd hosts on port {proxy_port}")
+    print(f"Proxy IPv4: {proxy_ip}; scanning odd hosts in its /24 on port {proxy_port}")
 
-    # iterate odd IPs
-    for odd_ip in iter_odd_ips_in_24(proxy_ip):
-        print(f"[+] trying {odd_ip}:{proxy_port} ...", end="", flush=True)
-        res = attempt_connect_then_proxy_connect(odd_ip, proxy_port, scheme, proxy_auth, args.timeout)
-        if res.get("tcp_connect_err"):
-            print(f" no-connect ({res['tcp_connect_err']})")
+    results = []
+    for odd in iter_odd_ips_in_24(proxy_ip):
+        print(f"[+] Trying {odd}:{proxy_port} ...", end="", flush=True)
+        r = attempt_connect_then_ws(odd, proxy_port, scheme, proxy_auth, args.timeout)
+        if r.get("tcp_connect_err"):
+            print(f" no-connect ({r['tcp_connect_err']})")
+            results.append((odd, r))
             continue
-        # we connected to odd_ip; now see CONNECT status
-        status = res.get("connect_status")
-        line = res.get("connect_line") or ""
-        if status is None:
-            print(" connected -> no numeric response from proxy (skipping)")
+        print(f" connected -> CONNECT {r['connect_line']!s}")
+        if not (r["connect_status"] and 200 <= r["connect_status"] < 300):
+            print(" -> CONNECT not 2xx")
+            results.append((odd, r))
             continue
-        print(f" connected -> CONNECT responded {line!s}")
 
-        if 200 <= status < 300:
-            # CONNECT succeeded; we already sent TEST. Show result and stop scanning.
-            probe_sent = res.get("probe_sent")
-            probe_resp = res.get("probe_response")
-            probe_err = res.get("probe_err")
-            print(" -> CONNECT 200 OK; TEST sent.")
-            if probe_err:
-                print(f"Probe error: {probe_err}")
-            if probe_sent:
-                if probe_resp is None:
-                    print("Probe: no response (timeout).")
-                elif probe_resp == b"":
-                    print("Probe: peer closed connection immediately (empty read).")
-                else:
-                    # print snippet safely
-                    snippet = probe_resp[:1024]
-                    try:
-                        s = snippet.decode("utf-8", errors="replace")
-                    except Exception:
-                        s = repr(snippet)
-                    print(f"Probe: got {len(probe_resp)} bytes back:\n{s}")
+        # CONNECT succeeded; report WS/probe details (but continue scanning)
+        if r["ws_handshake_ok"]:
+            reply_summary = "(no reply)"
+            if r.get("ws_reply") is None:
+                reply_summary = "(no ws frame received)"
+            elif r["ws_reply"] == b"":
+                reply_summary = "(peer closed immediately)"
             else:
-                print("Probe: not sent.")
-            print("\nResult (first successful):")
-            print(f"  odd_ip_used       : {res['odd_ip']}")
-            print(f"  proxy_port        : {proxy_port}")
-            print(f"  even_target       : {res['even_ip']}:2024")
-            print(f"  connect_status    : {status} ({line})")
-            print(f"  probe_sent        : {probe_sent}")
-            print(f"  probe_response_len: {None if probe_resp is None else len(probe_resp)}")
-            return
+                try:
+                    reply_summary = r["ws_reply"].decode("utf-8", errors="replace")
+                except Exception:
+                    reply_summary = repr(r["ws_reply"][:200])
+            print(f" -> WebSocket handshake: SUCCESS; reply: {reply_summary!s}")
+        else:
+            print(f" -> WebSocket handshake FAILED: {r.get('ws_reason')}")
+        results.append((odd, r))
+        # continue scanning (do NOT stop on first success)
 
-        # CONNECT wasn't 200 — close and continue
-        print(" -> CONNECT not allowed (not 2xx), continuing scan.")
-
-    print("Scan finished: no odd IP produced a successful CONNECT+TEST sequence.")
+    # Summary
+    print("\n--- Summary ---")
+    total = len(results)
+    success_ws = [t for t in results if t[1].get("ws_handshake_ok")]
+    connected = [t for t in results if not t[1].get("tcp_connect_err") and t[1].get("connect_status")]
+    print(f"Hosts tried: {total}")
+    print(f"Hosts where TCP connect succeeded (to odd_ip): {len(connected)}")
+    print(f"Hosts where WS handshake succeeded: {len(success_ws)}")
+    if success_ws:
+        print("\nSuccessful WebSocket targets:")
+        for odd, r in success_ws:
+            print(f"  odd {odd} -> even {r['even_ip']}:2024, reply_len: {None if r.get('ws_reply') is None else len(r.get('ws_reply'))}")
+    print("--- Done ---")
 
 if __name__ == "__main__":
     main()
