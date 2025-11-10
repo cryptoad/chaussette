@@ -24,7 +24,7 @@ import base64
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-DEFAULT_TIMEOUT = 4.0  # seconds
+DEFAULT_TIMEOUT = 1.0  # seconds
 MAX_READ_BYTES = 16 * 1024  # safety cap when reading response
 SNIPPET_BYTES = 128  # bytes to show for non-HTTP replies
 
