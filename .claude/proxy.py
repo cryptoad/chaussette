@@ -7,8 +7,8 @@ and send a custom payload (default "X\\r\\n\\r\\n") through the tunnel, then pri
 
 Usage examples:
   python3 proxy_connect_custom_probe.py -p 15004
-  python3 proxy_connect_custom_probe.py -p 2024 --payload "X\\r\\n\\r\\n"
-  python3 proxy_connect_custom_probe.py --proxy http://user:pass@proxy:3128 --payload "HELLO\\r\\n"
+  python3 proxy_connect_custom_probe.py -p 2024 --payload "X\r\n\r\n"
+  python3 proxy_connect_custom_probe.py --proxy http://user:pass@proxy:3128 --payload "HELLO\r\n"
 
 """
 
@@ -144,8 +144,8 @@ def main():
     ap = argparse.ArgumentParser(description="HTTP CONNECT raw probe via proxy to local IP.")
     ap.add_argument("-p","--port", type=int, default=15004, help="target port")
     ap.add_argument("--proxy", help="override HTTP_PROXY env")
-    ap.add_argument("--payload", default="X\\r\\n\\r\\n",
-                    help="payload string to send after CONNECT (default 'X\\r\\n\\r\\n')")
+    ap.add_argument("--payload", default="TOAD\r\n\r\n",
+                    help="payload string to send after CONNECT (default 'TOAD\r\n\r\n')")
     ap.add_argument("-t","--timeout", type=float, default=3.0, help="timeout seconds")
     args = ap.parse_args()
 
