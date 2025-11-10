@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-scan_proxy_subnet_upgrade.py
+scan_proxy_subnet_ws_upgrade.py
 
 Scan odd IPs in the /24 of the proxy IP (from HTTP_PROXY).
 For each odd IP O:
   - attempt TCP connect to O:proxy_port
   - if connect succeeds, attempt "CONNECT E:2024" where E = O - 1
-  - if CONNECT returns 2xx, send a simple GET with "Connection: Upgrade"
-  - display result and stop the scan on the first successful CONNECT
+  - if CONNECT returns 2xx, send a WebSocket-style Upgrade request
+  - print result and stop scanning on the first successful CONNECT
 
 Usage:
-  python3 scan_proxy_subnet_upgrade.py
-  python3 scan_proxy_subnet_upgrade.py --proxy http://user:pass@1.2.3.4:3128 -t 3
+  python3 scan_proxy_subnet_ws_upgrade.py
+  python3 scan_proxy_subnet_ws_upgrade.py --proxy http://user:pass@1.2.3.4:3128 -t 3
 """
 
 import os
@@ -20,18 +20,12 @@ import ssl
 import urllib.parse
 import base64
 import argparse
+import hashlib
 import time
 
 DEFAULT_TIMEOUT = 3.0
 READ_LIMIT = 4096
-UPGRADE_REQ = (
-    "GET / HTTP/1.1\r\n"
-    "Host: {target}\r\n"
-    "User-Agent: proxy-upgrade-scan/1.0\r\n"
-    "Connection: Upgrade\r\n"
-    "Upgrade: test\r\n"
-    "\r\n"
-).encode("utf-8")
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 def parse_proxy_env(explicit=None):
     val = explicit or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
@@ -69,7 +63,7 @@ def ip_to_octets(ip):
 
 def iter_odd_ips_in_24(base_ip):
     a,b,c,_ = ip_to_octets(base_ip)
-    for host in range(1, 255, 2):  # odd numbers only
+    for host in range(1, 255, 2):  # odd IPs
         yield f"{a}.{b}.{c}.{host}"
 
 def tcp_connect(ip, port, timeout):
@@ -108,6 +102,14 @@ def parse_status_line(head):
     code = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
     return code, first
 
+def make_ws_key():
+    key = os.urandom(16)
+    return base64.b64encode(key).decode()
+
+def ws_expected_accept(key):
+    sha = hashlib.sha1((key + WS_GUID).encode()).digest()
+    return base64.b64encode(sha).decode()
+
 def attempt(ip_odd, proxy_port, scheme, proxy_auth, timeout):
     result = {"odd_ip": ip_odd, "even_ip": None, "connect_status": None, "reply": None}
 
@@ -141,22 +143,42 @@ def attempt(ip_odd, proxy_port, scheme, proxy_auth, timeout):
 
     print(f"  CONNECT OK ({line})")
 
-    # send simple Upgrade request
-    try:
-        payload = UPGRADE_REQ.replace(b"{target}", f"{even_ip}:2024".encode())
-        sock.sendall(payload)
-        data = sock.recv(READ_LIMIT)
-        if data:
-            result["reply"] = data
-    except Exception as e:
-        result["reply"] = f"(error reading: {e})".encode()
-    finally:
-        sock.close()
+    # send WebSocket Upgrade request
+    ws_key = make_ws_key()
+    expected_accept = ws_expected_accept(ws_key)
+    upgrade_req = (
+        f"GET / HTTP/1.1\r\n"
+        f"Host: {even_ip}:2024\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {ws_key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "User-Agent: proxy-ws-upgrade/1.0\r\n"
+        "\r\n"
+    )
+    sock.sendall(upgrade_req.encode())
+    data = read_until(sock)
+    sock.close()
 
+    if not data:
+        print("  No response to WebSocket Upgrade.")
+        return result
+
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except Exception:
+        text = repr(data[:512])
+    print("\n--- WebSocket Upgrade Reply ---")
+    print(text)
+    print("--- End ---\n")
+    result["reply"] = text
+
+    # stop scanning
+    print("Stopping after first successful CONNECT.")
     return result
 
 def main():
-    ap = argparse.ArgumentParser(description="Scan odd IPs in proxy /24; CONNECT to even_ip:2024 and send Connection: Upgrade.")
+    ap = argparse.ArgumentParser(description="Scan odd IPs in proxy /24; CONNECT to even_ip:2024 then send WebSocket Upgrade and stop on first success.")
     ap.add_argument("--proxy", help="override HTTP_PROXY")
     ap.add_argument("-t", "--timeout", type=float, default=DEFAULT_TIMEOUT, help="timeout seconds")
     args = ap.parse_args()
@@ -175,21 +197,9 @@ def main():
     for odd in iter_odd_ips_in_24(proxy_ip):
         print(f"[+] Trying {odd}:{pport} ...", end="", flush=True)
         res = attempt(odd, pport, scheme, pauth, args.timeout)
-        if not res.get("connect_status") or res["connect_status"] < 200 or res["connect_status"] >= 300:
-            continue
-        # CONNECT succeeded
-        reply = res.get("reply")
-        if not reply:
-            print("  No reply to Upgrade.")
-        else:
-            print("\n--- Reply ---")
-            try:
-                print(reply.decode('utf-8', errors='replace'))
-            except Exception:
-                print(repr(reply[:512]))
-        print("\nScan stopped after first successful CONNECT.")
-        return
-
+        if res.get("connect_status") and 200 <= res["connect_status"] < 300:
+            # successful CONNECT → stop scanning
+            return
     print("No successful CONNECT found.")
 
 if __name__ == "__main__":
