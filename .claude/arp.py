@@ -167,7 +167,7 @@ def send_arp_requests(iface: str, src_mac: str, src_ip: str, targets: List[str])
     for t in targets:
         pkt = build_arp_request(src_mac_b, src_ip_b, ip_str_to_bytes(t))
         # specify proto in address tuple to be explicit
-        raw.sendto(pkt, (iface, proto))
+        raw.sendto(pkt, (iface, 0))
     raw.close()
 
 def listen_for_replies(iface: str, timeout: float = 3.0) -> Dict[str, str]:
