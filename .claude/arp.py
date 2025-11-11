@@ -148,10 +148,10 @@ def expand_targets_from_ip_ipv4_cidr(ipv4: str, cidr: int = 24) -> List[str]:
     net = ipaddress.ip_network(f"{ipv4}/{cidr}", strict=False)
     return [str(ip) for ip in net.hosts()]
 
-def send_arp_requests(iface: str, src_mac: str, src_ip: str, targets: List[str]) -> None:
+def send_arp_requests(iface: str, src_mac: str, src_ip: str, targets: list[str]) -> None:
     """
-    Create AF_PACKET socket with ETH_P_ARP and send ARP requests.
-    Use sendto(..., (iface, htons(ETH_P_ARP))) which avoids Errno 95 on most kernels.
+    Create AF_PACKET socket with ETH_P_ARP and send ARP requests via send().
+    Some kernels/interfaces reject sendto() with (iface, proto), so we just bind + send().
     """
     proto = socket.htons(ETH_P_ARP)
     raw = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, proto)
@@ -166,8 +166,11 @@ def send_arp_requests(iface: str, src_mac: str, src_ip: str, targets: List[str])
 
     for t in targets:
         pkt = build_arp_request(src_mac_b, src_ip_b, ip_str_to_bytes(t))
-        # specify proto in address tuple to be explicit
-        raw.sendto(pkt, (iface, 0))
+        # Just send() after binding – no sendto() arguments
+        try:
+            raw.send(pkt)
+        except OSError as e:
+            print(f"[!] send() failed for {t}: {e}")
     raw.close()
 
 def listen_for_replies(iface: str, timeout: float = 3.0) -> Dict[str, str]:
