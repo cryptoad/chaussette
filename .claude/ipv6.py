@@ -53,10 +53,11 @@ def ping_multicast(ifname):
     print(f"[*] Pinging ff02::1 on {ifname}...")
     try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
-        s.settimeout(2)
+        s.settimeout(5)
         if_idx = socket.if_nametoindex(ifname)
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, if_idx)
-
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 5)
+        s.bind(("::", 0, 0, if_idx))
         icmp_type, icmp_code, ident, seq = 128, 0, os.getpid() & 0xffff, 1
         pseudo = struct.pack("!BBHHH", icmp_type, icmp_code, 0, ident, seq)
         s.sendto(pseudo, ("ff02::1", 0, 0, if_idx))
