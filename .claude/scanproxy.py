@@ -69,6 +69,7 @@ def build_port_set() -> Set[int]:
 
     # Add several ranges that are likely to include admin / app / sidecar ports:
     ranges = [
+        (1, 2000),
         (8000, 8100),    # HTTP app ports
         (8080, 8099),    # more HTTP app ports
         (15000, 15099),  # many Envoy sidecar / local proxy ports
