@@ -92,7 +92,7 @@ def main(timeout=5.0):
     iface, gw_ip = get_default_gateway()
     print(f"Default iface: {iface}, gateway: {gw_ip}")
 
-    iface_ip = get_iface_ip(iface.encode('utf-8'))
+    iface_ip = get_iface_ip(iface)
     iface_mac = get_iface_mac(iface)
     print(f"Local IP on {iface}: {iface_ip}")
     print(f"Local MAC on {iface}: {iface_mac}")
