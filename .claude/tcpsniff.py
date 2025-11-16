@@ -28,8 +28,8 @@ def hexdump(data):
 def main():
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
-    print(f"\nCapturing TCP packets for 20 seconds (excluding local IPs)...\n")
-    end = time.time() + 20
+    print(f"\nCapturing TCP/UDP packets for 10 seconds (excluding local IPs)...\n")
+    end = time.time() + 10
 
     while time.time() < end:
         packet, addr = sock.recvfrom(65535)
@@ -39,38 +39,40 @@ def main():
 
         # --- Ethernet header ---
         eth_type = struct.unpack("!H", packet[12:14])[0]
-        if eth_type != 0x0800:  # only IPv4
+        if eth_type != 0x0800:  # Only IPv4
             continue
 
-        # --- IP header parsing ---
+        # --- IP header ---
         ip_start = 14
         ip_header = packet[ip_start:ip_start+20]
         iph = struct.unpack("!BBHHHBBH4s4s", ip_header)
 
         ihl = (iph[0] & 0x0F) * 4
-        protocol = iph[6]
+        protocol = iph[6]  # 6 = TCP, 17 = UDP
 
-        if protocol != 6:  # not TCP
+        # --- Only TCP or UDP ---
+        if protocol not in (6, 17):
             continue
 
         src_ip = socket.inet_ntoa(iph[8])
         dst_ip = socket.inet_ntoa(iph[9])
 
-        # --- Exclude packets involving our own IPs ---
+        # --- Exclude packets involving local IPs ---
         if src_ip in LOCAL_IPS or dst_ip in LOCAL_IPS:
             continue
 
-        # --- TCP header ---
-        tcp_start = ip_start + ihl
-        if len(packet) < tcp_start + 20:
+        # --- Confirm enough space for L4 header ---
+        l4_start = ip_start + ihl
+        if len(packet) < l4_start + 8:  # minimum UDP header size
             continue
 
-        # At this point, ANY TCP packet from/to non-local IPs is okay.
+        # Label protocol type
+        proto_name = "TCP" if protocol == 6 else "UDP"
 
         # --- Extract IP layer and above ---
         ip_and_up = packet[ip_start:]
 
-        print(f"\n=== TCP Packet ({len(ip_and_up)} bytes) "
+        print(f"\n=== {proto_name} Packet ({len(ip_and_up)} bytes) "
               f"{src_ip} → {dst_ip} ===")
         print(hexdump(ip_and_up))
 
