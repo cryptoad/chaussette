@@ -19,8 +19,8 @@ def hexdump(data):
 def main():
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
-    print("Capturing packets for 5 seconds...\n")
-    end = time.time() + 5
+    print("Capturing packets for 3 seconds...\n")
+    end = time.time() + 3
 
     while time.time() < end:
         packet, addr = sock.recvfrom(65535)
