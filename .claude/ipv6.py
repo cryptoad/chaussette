@@ -195,6 +195,7 @@ def mac_to_ipv6_link_local(mac_bytes):
 def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT):
     print(f"\n[+] Scanning IPv6 {addr}%{iface}...")
     scope_id = socket.if_nametoindex(iface)
+    exception_types = set()
 
     for port in ports:
         try:
@@ -205,7 +206,15 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT):
             if r == 0:
                 print(f"  [OPEN] {port}")
         except:
+            exception_types.add(type(e).__name__)
             pass
+
+    if exception_types:
+        print("\n[!] Exceptions encountered:")
+        for t in sorted(exception_types):
+            print("   -", t)
+    else:
+        print("\n[+] No exceptions encountered.")
 
 
 def main():
