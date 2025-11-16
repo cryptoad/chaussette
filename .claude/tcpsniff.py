@@ -7,19 +7,23 @@ import subprocess
 DISPLAY_LEN = 128
 
 def get_local_ips():
-    """Return a set of all local IPs from `hostname -I`."""
+    """Return a set of all local IPs from hostname -I."""
     out = subprocess.check_output(["hostname", "-I"], text=True).strip()
     return set(out.split())
 
 LOCAL_IPS = get_local_ips()
-print("Local IPs to exclude:", LOCAL_IPS)
+print("Local IPs:", LOCAL_IPS)
+
+def mac_addr(raw):
+    """Convert 6-byte binary MAC to human-readable form."""
+    return ":".join(f"{b:02x}" for b in raw)
 
 def hexdump(data):
     data = data[:DISPLAY_LEN]
     hex_bytes = data.hex()
     byte_list = [hex_bytes[i:i+2] for i in range(0, len(hex_bytes), 2)]
-
     lines = []
+
     for i in range(0, len(byte_list), 16):
         lines.append(" ".join(byte_list[i:i+16]))
 
@@ -28,17 +32,19 @@ def hexdump(data):
 def main():
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
-    print(f"\nCapturing TCP/UDP packets for 10 seconds (excluding local IPs)...\n")
+    print("\nCapturing TCP/UDP packets for 10 seconds...\n")
     end = time.time() + 10
 
     while time.time() < end:
         packet, addr = sock.recvfrom(65535)
-
         if len(packet) < 34:
             continue
 
         # --- Ethernet header ---
+        dst_mac = mac_addr(packet[0:6])
+        src_mac = mac_addr(packet[6:12])
         eth_type = struct.unpack("!H", packet[12:14])[0]
+
         if eth_type != 0x0800:  # Only IPv4
             continue
 
@@ -50,30 +56,24 @@ def main():
         ihl = (iph[0] & 0x0F) * 4
         protocol = iph[6]  # 6 = TCP, 17 = UDP
 
-        # --- Only TCP or UDP ---
         if protocol not in (6, 17):
             continue
 
         src_ip = socket.inet_ntoa(iph[8])
         dst_ip = socket.inet_ntoa(iph[9])
 
-        # --- Exclude packets involving local IPs ---
-        if src_ip in LOCAL_IPS or dst_ip in LOCAL_IPS:
-            continue
-
-        # --- Confirm enough space for L4 header ---
-        l4_start = ip_start + ihl
-        if len(packet) < l4_start + 8:  # minimum UDP header size
-            continue
-
-        # Label protocol type
+        # Log IP + MAC of the packet always
         proto_name = "TCP" if protocol == 6 else "UDP"
+        print(f"\n[{proto_name}] {src_ip} ({src_mac})  →  {dst_ip} ({dst_mac})")
+
+        # Only output content if either side is local
+        if src_ip not in LOCAL_IPS and dst_ip not in LOCAL_IPS:
+            continue
 
         # --- Extract IP layer and above ---
         ip_and_up = packet[ip_start:]
 
-        print(f"\n=== {proto_name} Packet ({len(ip_and_up)} bytes) "
-              f"{src_ip} → {dst_ip} ===")
+        print(f"--- Showing first {DISPLAY_LEN} bytes of IP-layer data ---")
         print(hexdump(ip_and_up))
 
     print("\nDone.")
