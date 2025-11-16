@@ -6,14 +6,16 @@ import fcntl
 import os
 import time
 
+
 def get_default_gateway():
     with open("/proc/net/route") as f:
         for line in f.readlines()[1:]:
             iface, dest, gw, flags, _, _, _, _, _, _, _ = line.split()
-            if dest == "00000000":  # default route
+            if dest == "00000000":
                 gw_hex = bytes.fromhex(gw)
                 return socket.inet_ntoa(gw_hex[::-1]), iface
     raise RuntimeError("No default gateway found")
+
 
 def get_iface_hwaddr(iface):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -22,37 +24,55 @@ def get_iface_hwaddr(iface):
     )
     return info[18:24]
 
+
 def get_source_ip():
-    # Parse hostname -I output
     ips = os.popen("hostname -I").read().strip().split()
     for ip in ips:
         if "." in ip and not ip.startswith("127."):
             return ip
-    raise RuntimeError("Could not determine source IPv4")
+    raise RuntimeError("Could not determine IPv4 from hostname -I")
 
-def arp_resolve(sock, src_mac, src_ip, target_ip):
-    broadcast = b"\xff"*6
-    eth = broadcast + src_mac + b"\x08\x06"
 
-    arp = struct.pack("!HHBBH6s4s6s4s",
-        1, 0x0800,
-        6, 4,
-        1,
-        src_mac,
-        socket.inet_aton(src_ip),
-        b"\x00"*6,
-        socket.inet_aton(target_ip)
-    )
+def learn_gateway_mac(sock, iface, gateway_ip, timeout=3):
+    """
+    Passive MAC discovery: capture packets until we see the gateway.
+    """
+    print(f"[+] Passive learning: looking for MAC of {gateway_ip} ...")
 
-    sock.send(eth + arp)
-    sock.settimeout(2)
+    end = time.time() + timeout
+    sock.settimeout(0.3)
 
-    while True:
-        pkt = sock.recv(2048)
-        if pkt[12:14] == b"\x08\x06" and pkt[20:22] == b"\x00\x02":
-            sender_ip = socket.inet_ntoa(pkt[28:32])
-            if sender_ip == target_ip:
-                return pkt[22:28]
+    gw_ip_raw = socket.inet_aton(gateway_ip)
+
+    while time.time() < end:
+        try:
+            pkt = sock.recv(2048)
+        except socket.timeout:
+            continue
+
+        if len(pkt) < 34:
+            continue
+
+        src_mac = pkt[6:12]
+        ethertype = pkt[12:14]
+
+        # ARP?
+        if ethertype == b"\x08\x06" and len(pkt) >= 42:
+            opcode = pkt[20:22]
+            sender_ip = pkt[28:32]
+            if opcode == b"\x00\x02" and sender_ip == gw_ip_raw:
+                print("[+] Learned gateway MAC from ARP reply")
+                return src_mac
+
+        # IPv4?
+        if ethertype == b"\x08\x00":
+            ip_src = pkt[26:30]
+            if ip_src == gw_ip_raw:
+                print("[+] Learned gateway MAC from IPv4 packet")
+                return src_mac
+
+    raise RuntimeError("Could not discover gateway MAC via passive sniffing")
+
 
 def checksum(data):
     if len(data) % 2:
@@ -61,6 +81,7 @@ def checksum(data):
     s = (s >> 16) + (s & 0xffff)
     s += s >> 16
     return (~s) & 0xffff
+
 
 def build_syn_packet(src_mac, dst_mac, src_ip, dst_ip, sport, dport, seq):
     eth = dst_mac + src_mac + b"\x08\x00"
@@ -77,57 +98,59 @@ def build_syn_packet(src_mac, dst_mac, src_ip, dst_ip, sport, dport, seq):
         socket.inet_aton(dst_ip)
     )
 
-    offset_res_flags = (5 << 12) | 0x002  # SYN flag
+    flags = (5 << 12) | 0x002  # SYN
     tcp_header = struct.pack("!HHLLHHHH",
         sport, dport, seq, 0,
-        offset_res_flags, 1024, 0, 0
+        flags, 1024, 0, 0
     )
 
     pseudo = socket.inet_aton(src_ip) + socket.inet_aton(dst_ip) + struct.pack("!BBH", 0, socket.IPPROTO_TCP, len(tcp_header))
     tcp_sum = checksum(pseudo + tcp_header)
+
     tcp_header = tcp_header[:16] + struct.pack("!H", tcp_sum) + tcp_header[18:]
 
     return eth + ip_header + tcp_header
 
+
 def main():
     gw_ip, iface = get_default_gateway()
-    print(f"[+] Default gateway: {gw_ip} on {iface}")
+    print(f"[+] Default gateway: {gw_ip} via {iface}")
 
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
     sock.bind((iface, 0))
 
-    src_mac = get_iface_hwaddr(iface)
     src_ip = get_source_ip()
+    src_mac = get_iface_hwaddr(iface)
+    print(f"[+] Source MAC={src_mac.hex(':')} IP={src_ip}")
 
-    print(f"[+] Local MAC: {src_mac.hex(':')}  IP: {src_ip}")
-    print(f"[+] Resolving ARP for gateway {gw_ip} ...")
+    # -------- PASSIVE MAC DISCOVERY --------
+    gw_mac = learn_gateway_mac(sock, iface, gw_ip)
+    print(f"[+] Gateway MAC = {gw_mac.hex(':')}")
 
-    gw_mac = arp_resolve(sock, src_mac, src_ip, gw_ip)
-    print(f"[+] Gateway MAC: {gw_mac.hex(':')}")
-
+    # Port list
     ports = [22, 53, 80, 443] + list(range(10000, 10200))
     ports = ports[:200]
 
     sport = random.randint(20000, 60000)
     seq = random.randint(0, 2**32 - 1)
 
-    print("[+] Sending SYN packets...")
+    print("[+] Sending SYN packets ...")
     for p in ports:
         pkt = build_syn_packet(src_mac, gw_mac, src_ip, gw_ip, sport, p, seq)
         sock.send(pkt)
 
-    print("[+] Listening for replies...")
+    print("[+] Listening for replies ...")
     sock.settimeout(0.25)
-
-    open_ports = set()
     deadline = time.time() + 2
+    open_ports = set()
 
     while time.time() < deadline:
         try:
             data = sock.recv(2048)
         except socket.timeout:
-            break
+            continue
 
+        # IPv4?
         if data[12:14] != b"\x08\x00":
             continue
 
@@ -141,20 +164,20 @@ def main():
 
         tcp = data[34:54]
         sport_r, dport_r, _, _, flags = struct.unpack("!HHLLH", tcp[:14])
-
         if dport_r != sport:
             continue
 
         if flags & 0x012 == 0x012:
-            print(f"    [+] OPEN: {sport_r} (SYN-ACK)")
+            print(f"    [+] OPEN: {sport_r}")
             open_ports.add(sport_r)
 
     print("\nScan complete.")
     if open_ports:
         for p in sorted(open_ports):
-            print(f"Open port: {p}")
+            print("Open port:", p)
     else:
-        print("No open ports detected.")
+        print("No open ports found.")
+
 
 if __name__ == "__main__":
     main()
