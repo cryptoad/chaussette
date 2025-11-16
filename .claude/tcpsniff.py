@@ -2,9 +2,17 @@
 import socket
 import struct
 import time
+import subprocess
 
-TARGET_PORT = 15004
 DISPLAY_LEN = 128
+
+def get_local_ips():
+    """Return a set of all local IPs from `hostname -I`."""
+    out = subprocess.check_output(["hostname", "-I"], text=True).strip()
+    return set(out.split())
+
+LOCAL_IPS = get_local_ips()
+print("Local IPs to exclude:", LOCAL_IPS)
 
 def hexdump(data):
     data = data[:DISPLAY_LEN]
@@ -12,58 +20,58 @@ def hexdump(data):
     byte_list = [hex_bytes[i:i+2] for i in range(0, len(hex_bytes), 2)]
 
     lines = []
-    for i in range(0, len(byte_list), 16):   # 16 bytes per line
+    for i in range(0, len(byte_list), 16):
         lines.append(" ".join(byte_list[i:i+16]))
 
     return "\n".join(lines)
 
 def main():
-    # Raw Ethernet socket
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
-    print(f"Capturing TCP packets to port {TARGET_PORT} for 10 seconds...\n")
+    print(f"\nCapturing TCP packets for 10 seconds (excluding local IPs)...\n")
     end = time.time() + 10
 
     while time.time() < end:
         packet, addr = sock.recvfrom(65535)
 
-        # Must contain at least Ethernet(14) + IP
         if len(packet) < 34:
             continue
 
-        # --- Ethernet type ---
+        # --- Ethernet header ---
         eth_type = struct.unpack("!H", packet[12:14])[0]
-        if eth_type != 0x0800:  # IPv4 only
+        if eth_type != 0x0800:  # only IPv4
             continue
 
-        # --- Parse IP header ---
-        ip_header_start = 14
-        ip_header = packet[ip_header_start:ip_header_start+20]
+        # --- IP header parsing ---
+        ip_start = 14
+        ip_header = packet[ip_start:ip_start+20]
         iph = struct.unpack("!BBHHHBBH4s4s", ip_header)
 
         ihl = (iph[0] & 0x0F) * 4
         protocol = iph[6]
 
-        if protocol != 6:   # not TCP
+        if protocol != 6:  # not TCP
             continue
 
-        # --- Parse TCP header ---
-        tcp_start = ip_header_start + ihl
+        src_ip = socket.inet_ntoa(iph[8])
+        dst_ip = socket.inet_ntoa(iph[9])
+
+        # --- Exclude packets involving our own IPs ---
+        if src_ip in LOCAL_IPS or dst_ip in LOCAL_IPS:
+            continue
+
+        # --- TCP header ---
+        tcp_start = ip_start + ihl
         if len(packet) < tcp_start + 20:
             continue
 
-        tcp_header = packet[tcp_start:tcp_start+20]
-        tcph = struct.unpack("!HHLLBBHHH", tcp_header)
-        dst_port = tcph[1]
-
-        if dst_port != TARGET_PORT:
-            continue
+        # At this point, ANY TCP packet from/to non-local IPs is okay.
 
         # --- Extract IP layer and above ---
-        ip_and_up = packet[ip_header_start:]
+        ip_and_up = packet[ip_start:]
 
-        print(f"\n=== TCP Packet to {TARGET_PORT} "
-              f"(IP layer size: {len(ip_and_up)} bytes) ===")
+        print(f"\n=== TCP Packet ({len(ip_and_up)} bytes) "
+              f"{src_ip} → {dst_ip} ===")
         print(hexdump(ip_and_up))
 
     print("\nDone.")
