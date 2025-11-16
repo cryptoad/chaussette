@@ -64,7 +64,7 @@ COMMON_TCP_PORTS = [
     15004               # <– your custom port
 ]
 
-SCAN_PORTS = COMMON_TCP_PORTS
+SCAN_PORTS = range(1, 10000)
 SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 
@@ -207,8 +207,7 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT):
                 print(f"  [OPEN] {port}")
         except Exception as e:
             exception_types.add(type(e).__name__)
-            print(e)
-            return
+            pass
 
     if exception_types:
         print("\n[!] Exceptions encountered:")
