@@ -1,174 +1,253 @@
 #!/usr/bin/env python3
+import subprocess
 import socket
 import struct
-import random
 import fcntl
 import os
 import time
 
+ETH_P_ARP = 0x0806  # ARP ethertype
+SIOCGIFADDR = 0x8915
+SIOCGIFHWADDR = 0x8927
 
-def get_default_gateway():
-    with open("/proc/net/route") as f:
-        for line in f.readlines()[1:]:
-            iface, dest, gw, flags, _, _, _, _, _, _, _ = line.split()
-            if dest == "00000000":
-                gw_hex = bytes.fromhex(gw)
-                return socket.inet_ntoa(gw_hex[::-1]), iface
-    raise RuntimeError("No default gateway found")
+SCAN_PORTS = list(range(1, 201))  # ~200 "known" ports (1-200)
+SCAN_TIMEOUT = 0.15               # seconds per port (adjust if needed)
+ARP_SNIFF_TIMEOUT = 5.0           # seconds to wait for ARP reply
 
 
-def get_iface_hwaddr(iface):
+def get_local_ipv4_from_hostname():
+    out = subprocess.check_output(["hostname", "-I"], text=True).strip()
+    for token in out.split():
+        if "." in token and not token.startswith("127."):
+            return token
+    raise RuntimeError("No non-loopback IPv4 address found from hostname -I")
+
+
+def get_iface_ipv4(iface):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    info = fcntl.ioctl(
-        s.fileno(), 0x8927, struct.pack('256s', iface.encode()[:15])
-    )
-    return info[18:24]
+    ifreq = struct.pack("256s", iface.encode("utf-8"))
+    res = fcntl.ioctl(s.fileno(), SIOCGIFADDR, ifreq)
+    ip = socket.inet_ntoa(res[20:24])
+    s.close()
+    return ip
 
 
-def get_source_ip():
-    ips = os.popen("hostname -I").read().strip().split()
-    for ip in ips:
-        if "." in ip and not ip.startswith("127."):
-            return ip
-    raise RuntimeError("Could not determine IPv4 from hostname -I")
+def get_default_gateway_for_ip(local_ip):
+    """
+    Parse /proc/net/route to find the default gateway for the interface
+    whose IPv4 address matches local_ip.
+    """
+    with open("/proc/net/route", "r") as f:
+        lines = f.readlines()[1:]  # skip header
 
+    routes = [l.strip().split() for l in lines if l.strip()]
 
-def sniff_gateway_mac(sock, gateway_ip, timeout=3):
-    gw_ip_raw = socket.inet_aton(gateway_ip)
-    end = time.time() + timeout
-    sock.settimeout(0.3)
-
-    print(f"[+] Sniffing traffic to learn MAC for {gateway_ip} ...")
-
-    while time.time() < end:
+    # First try to match interface IP to the local_ip
+    for fields in routes:
+        iface, dest_hex, gw_hex, flags_hex = fields[0], fields[1], fields[2], fields[3]
+        flags = int(flags_hex, 16)
+        # Destination 0.0.0.0 and GATEWAY flag
+        if dest_hex != "00000000" or not (flags & 0x2):
+            continue
         try:
-            pkt = sock.recv(2048)
-        except socket.timeout:
+            iface_ip = get_iface_ipv4(iface)
+        except OSError:
             continue
+        if iface_ip == local_ip:
+            gw = socket.inet_ntoa(struct.pack("<L", int(gw_hex, 16)))
+            return iface, gw
 
-        if len(pkt) < 34:
+    # Fallback: first default route
+    for fields in routes:
+        iface, dest_hex, gw_hex, flags_hex = fields[0], fields[1], fields[2], fields[3]
+        flags = int(flags_hex, 16)
+        if dest_hex != "00000000" or not (flags & 0x2):
             continue
+        gw = socket.inet_ntoa(struct.pack("<L", int(gw_hex, 16)))
+        return iface, gw
 
-        src_mac = pkt[6:12]
-        ethertype = pkt[12:14]
-
-        if ethertype != b"\x08\x00":  # IPv4 only
-            continue
-
-        ip_src = pkt[26:30]
-        ip_dst = pkt[30:34]
-
-        if ip_src == gw_ip_raw:
-            print("[+] Learned gateway MAC (source match)")
-            return src_mac
-
-        if ip_dst == gw_ip_raw:
-            print("[+] Learned gateway MAC (destination match)")
-            return src_mac
-
-    raise RuntimeError("Could not discover gateway MAC via passive sniffing")
+    raise RuntimeError("No default gateway found in /proc/net/route")
 
 
-def checksum(data):
-    if len(data) % 2:
-        data += b"\x00"
-    s = sum(struct.unpack("!%dH" % (len(data)//2), data))
-    s = (s >> 16) + (s & 0xffff)
-    s += s >> 16
-    return (~s) & 0xffff
+def get_local_mac(iface):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ifreq = struct.pack("256s", iface.encode("utf-8"))
+    res = fcntl.ioctl(s.fileno(), SIOCGIFHWADDR, ifreq)
+    s.close()
+    mac = res[18:24]
+    return mac  # 6 bytes
 
 
-def build_syn_packet(src_mac, dst_mac, src_ip, dst_ip, sport, dport, seq):
-    eth = dst_mac + src_mac + b"\x08\x00"
-
-    ver_ihl = 0x45
-    total_len = 20 + 20
-    ident = random.randint(0, 65535)
-
-    ip_header = struct.pack("!BBHHHBBH4s4s",
-        ver_ihl, 0,
-        total_len, ident, 0,
-        64, socket.IPPROTO_TCP, 0,
-        socket.inet_aton(src_ip),
-        socket.inet_aton(dst_ip)
-    )
-
-    flags = (5 << 12) | 0x002  # SYN
-    tcp_header = struct.pack("!HHLLHHHH",
-        sport, dport, seq, 0,
-        flags, 1024, 0, 0
-    )
-
-    pseudo = socket.inet_aton(src_ip) + socket.inet_aton(dst_ip) + struct.pack("!BBH", 0, socket.IPPROTO_TCP, len(tcp_header))
-    tcp_sum = checksum(pseudo + tcp_header)
-
-    tcp_header = tcp_header[:16] + struct.pack("!H", tcp_sum) + tcp_header[18:]
-
-    return eth + ip_header + tcp_header
+def bytes_to_mac_str(b):
+    return ":".join(f"{x:02x}" for x in b)
 
 
-def main():
-    gw_ip, iface = get_default_gateway()
-    print(f"[+] Default gateway: {gw_ip} via {iface}")
-
-    sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
-    sock.bind((iface, 0))
-
-    src_ip = get_source_ip()
-    src_mac = get_iface_hwaddr(iface)
-    print(f"[+] Source MAC={src_mac.hex(':')} IP={src_ip}")
-
-    gw_mac = sniff_gateway_mac(sock, gw_ip)
-    print(f"[+] Gateway MAC = {gw_mac.hex(':')}")
-
-    ports = [22, 53, 80, 443] + list(range(10000, 10200))
-    ports = ports[:200]
-
-    sport = random.randint(20000, 60000)
-    seq = random.randint(0, 2**32 - 1)
-
-    print("[+] Sending SYN packets ...")
-    for p in ports:
-        pkt = build_syn_packet(src_mac, gw_mac, src_ip, gw_ip, sport, p, seq)
-        sock.send(pkt)
-
-    print("[+] Listening for replies ...")
-    sock.settimeout(0.25)
-    deadline = time.time() + 2
-    open_ports = set()
-
-    while time.time() < deadline:
+def trigger_arp_to_gateway(gw_ip, iface):
+    """
+    Send a dummy UDP packet to the gateway to ensure the kernel
+    generates ARP traffic we can sniff.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Binding to the interface is optional but can help
         try:
-            data = sock.recv(2048)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
+        except OSError:
+            pass
+        s.settimeout(1.0)
+        # Port doesn't matter; packet will likely be dropped by gateway anyway
+        s.sendto(b"\x00", (gw_ip, 9))
+    except Exception:
+        pass
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def sniff_gateway_mac(iface, gw_ip, timeout=ARP_SNIFF_TIMEOUT):
+    """
+    Use an AF_PACKET RAW socket to sniff ARP replies and extract
+    the MAC for the gateway IP.
+    """
+    # Open raw socket bound to interface, ARP protocol
+    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ARP))
+    s.bind((iface, 0))
+    s.settimeout(timeout)
+
+    start = time.time()
+    while True:
+        remaining = timeout - (time.time() - start)
+        if remaining <= 0:
+            break
+        s.settimeout(remaining)
+        try:
+            pkt, addr = s.recvfrom(65535)
         except socket.timeout:
+            break
+
+        if len(pkt) < 42:
             continue
 
-        if data[12:14] != b"\x08\x00":
+        eth_type = struct.unpack("!H", pkt[12:14])[0]
+        if eth_type != ETH_P_ARP:
             continue
 
-        iphdr = data[14:34]
-        if iphdr[9] != 6:
+        arp = pkt[14:]
+        if len(arp) < 28:
             continue
 
-        src = socket.inet_ntoa(iphdr[12:16])
-        if src != gw_ip:
+        htype, ptype, hlen, plen, oper = struct.unpack("!HHBBH", arp[:8])
+        # We want ARP reply (oper == 2), IPv4, MAC length 6, IP length 4
+        if oper != 2 or ptype != 0x0800 or hlen != 6 or plen != 4:
             continue
 
-        tcp = data[34:54]
-        sport_r, dport_r, _, _, flags = struct.unpack("!HHLLH", tcp[:14])
-        if dport_r != sport:
-            continue
+        sha = arp[8:14]   # sender hardware address
+        spa = arp[14:18]  # sender protocol address (IPv4)
+        spa_str = socket.inet_ntoa(spa)
 
-        if flags & 0x012 == 0x012:
-            print(f"    [+] OPEN: {sport_r}")
-            open_ports.add(sport_r)
+        if spa_str == gw_ip:
+            s.close()
+            return sha
+
+    s.close()
+    return None
+
+
+def mac_to_ipv6_link_local(mac_bytes):
+    """
+    Convert a 6-byte MAC to an IPv6 link-local address using EUI-64:
+      fe80::xxxx:xxxx:xxxx:xxxx
+    """
+    if len(mac_bytes) != 6:
+        raise ValueError("MAC must be 6 bytes")
+
+    mac = bytearray(mac_bytes)
+    # Flip the U/L bit
+    mac[0] ^= 0x02
+
+    eui64 = bytearray(8)
+    eui64[0:3] = mac[0:3]
+    eui64[3:5] = b"\xff\xfe"
+    eui64[5:8] = mac[3:6]
+
+    # Format as standard IPv6 link-local
+    parts = [
+        0xfe80,
+        (eui64[0] << 8) | eui64[1],
+        (eui64[2] << 8) | eui64[3],
+        (eui64[4] << 8) | eui64[5],
+        (eui64[6] << 8) | eui64[7],
+    ]
+    # Compress zero groups minimally; here we just use standard formatting, no clever compression
+    addr = ":".join(f"{p:x}" for p in parts)
+    return addr
+
+
+def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT):
+    """
+    Perform a simple TCP connect scan on the given IPv6 link-local address.
+    """
+    print(f"\n[+] Scanning IPv6 {addr}%{iface} on {len(ports)} ports...")
+    scope_id = socket.if_nametoindex(iface)
+
+    open_ports = []
+    for port in ports:
+        try:
+            s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            # (address, port, flowinfo, scope_id)
+            res = s.connect_ex((addr, port, 0, scope_id))
+            s.close()
+            if res == 0:
+                print(f"  [OPEN] {port}")
+                open_ports.append(port)
+        except Exception:
+            # Treat errors as closed/filtered and continue
+            continue
 
     print("\nScan complete.")
     if open_ports:
-        for p in sorted(open_ports):
-            print("Open port:", p)
+        print("Open ports:", ", ".join(str(p) for p in open_ports))
     else:
-        print("No open ports found.")
+        print("No open ports detected (within timeout constraints).")
+
+
+def main():
+    if os.geteuid() != 0:
+        print("This script must be run as root (for raw AF_PACKET socket).")
+        return
+
+    local_ip = get_local_ipv4_from_hostname()
+    iface, gw_ip = get_default_gateway_for_ip(local_ip)
+
+    print(f"[+] Local IPv4:      {local_ip}")
+    print(f"[+] Interface:       {iface}")
+    print(f"[+] Gateway IPv4:    {gw_ip}")
+
+    local_mac = get_local_mac(iface)
+    print(f"[+] Local MAC:       {bytes_to_mac_str(local_mac)}")
+
+    print("\n[+] Triggering ARP to gateway and sniffing for its MAC...")
+    trigger_arp_to_gateway(gw_ip, iface)
+    gw_mac = sniff_gateway_mac(iface, gw_ip)
+
+    if not gw_mac:
+        print("[-] Failed to discover gateway MAC via ARP sniffing.")
+        return
+
+    print(f"[+] Gateway MAC:     {bytes_to_mac_str(gw_mac)}")
+
+    # Build IPv6 link-local addresses from MACs
+    local_ll = mac_to_ipv6_link_local(local_mac)
+    gw_ll = mac_to_ipv6_link_local(gw_mac)
+
+    print(f"\n[+] Local link-local IPv6 (derived):   {local_ll}%{iface}")
+    print(f"[+] Gateway link-local IPv6 (derived): {gw_ll}%{iface}")
+
+    # Now scan ~200 ports on the gateway's IPv6 link-local
+    scan_ipv6_ports(gw_ll, iface, SCAN_PORTS, timeout=SCAN_TIMEOUT)
 
 
 if __name__ == "__main__":
