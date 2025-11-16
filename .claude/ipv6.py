@@ -5,66 +5,33 @@ import struct
 import fcntl
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ETH_P_IP = 0x0800
 SIOCGIFADDR = 0x8915
 SIOCGIFHWADDR = 0x8927
 
 COMMON_TCP_PORTS = [
-    20, 21,             # FTP
-    22,                 # SSH
-    23,                 # Telnet
-    25,                 # SMTP
-    53,                 # DNS (TCP)
-    67, 68,             # DHCP
-    69,                 # TFTP
-    80,                 # HTTP
-    110,                # POP3
-    111,                # RPCbind
-    119,                # NNTP
-    123,                # NTP
-    135, 137, 138, 139, # NetBIOS / SMB
-    143,                # IMAP
-    161, 162,           # SNMP
-    389,                # LDAP
-    443,                # HTTPS
-    445,                # SMB
-    465,                # SMTPS
-    514,                # Syslog
-    587,                # SMTP Submission
-    631,                # IPP / CUPS
-    636,                # LDAPS
-    873,                # rsync
-    993, 995,           # IMAPs / POP3s
-    1080,               # SOCKS proxy
-    1433, 1521,         # MSSQL / Oracle
-    2049,               # NFS
-    2181,               # Zookeeper
-    2379, 2380,         # etcd
-    3306,               # MySQL
-    3389,               # RDP
-    3690,               # SVN
-    4443,               # HTTPS alt
-    4500,               # IPsec NAT-T
-    5000, 5001,         # misc services
-    5432,               # PostgreSQL
-    5672,               # RabbitMQ
-    5900,               # VNC
-    6080, 6081,         # noVNC
-    6379,               # Redis
-    6443,               # Kubernetes API
-    6667,               # IRC
-    7001,               # WebLogic
-    8000, 8008, 8080,   # HTTP alt
-    8443,               # HTTPS alt
-    8883,               # MQTT over TLS
-    9000, 9001,         # misc services
-    9092,               # Kafka
-    11211,              # Memcached
-    15004               # <– your custom port
+    20, 21, 22, 23, 25,
+    53, 67, 68, 69,
+    80, 110, 111, 119, 123,
+    135, 137, 138, 139,
+    143, 161, 162,
+    389, 443, 445, 465, 514, 587,
+    631, 636, 873, 993, 995,
+    1080, 1433, 1521, 2049,
+    2181, 2379, 2380,
+    3306, 3389, 3690, 4443, 4500,
+    5000, 5001, 5432, 5672,
+    5900, 6080, 6081, 6379,
+    6443, 6667, 7001,
+    8000, 8008, 8080,
+    8443, 8883, 9000, 9001,
+    9092, 11211,
+    15004
 ]
 
-SCAN_PORTS = range(1, 4000)
+SCAN_PORTS = COMMON_TCP_PORTS
 SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 
@@ -191,23 +158,42 @@ def mac_to_ipv6_link_local(mac_bytes):
     return f"fe80::{addr}"
 
 
-def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT):
+# -------------------------------------------------------------
+#   PARALLEL SCANNING
+# -------------------------------------------------------------
+def scan_one_port(scoped_addr, scope_id, port, timeout):
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        r = s.connect_ex((scoped_addr, port, 0, scope_id))
+        s.close()
+        if r == 0:
+            return port, None  # open
+        return None, None
+    except Exception as e:
+        return None, type(e).__name__
+
+
+def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=100):
     print(f"\n[+] Scanning IPv6 {addr}%{iface}...")
     scope_id = socket.if_nametoindex(iface)
-    exception_types = set()
     scoped_addr = f"{addr}%{iface}"
 
-    for port in ports:
-        try:
-            s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-            s.settimeout(timeout)
-            r = s.connect_ex((scoped_addr, port, 0, scope_id))
-            s.close()
-            if r == 0:
-                print(f"  [OPEN] {port}")
-        except Exception as e:
-            exception_types.add(type(e).__name__)
-            pass
+    exception_types = set()
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {
+            ex.submit(scan_one_port, scoped_addr, scope_id, port, timeout): port
+            for port in ports
+        }
+
+        for fut in as_completed(futures):
+            port = futures[fut]
+            open_port, exc = fut.result()
+            if open_port:
+                print(f"  [OPEN] {open_port}")
+            if exc:
+                exception_types.add(exc)
 
     if exception_types:
         print("\n[!] Exceptions encountered:")
