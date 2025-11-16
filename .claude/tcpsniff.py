@@ -28,8 +28,8 @@ def hexdump(data):
 def main():
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
-    print(f"\nCapturing TCP packets for 10 seconds (excluding local IPs)...\n")
-    end = time.time() + 10
+    print(f"\nCapturing TCP packets for 20 seconds (excluding local IPs)...\n")
+    end = time.time() + 20
 
     while time.time() < end:
         packet, addr = sock.recvfrom(65535)
