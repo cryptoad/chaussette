@@ -64,7 +64,7 @@ COMMON_TCP_PORTS = [
     15004               # <– your custom port
 ]
 
-SCAN_PORTS = range(1, 65535)
+SCAN_PORTS = COMMON_TCP_PORTS
 SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 
@@ -196,12 +196,13 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT):
     print(f"\n[+] Scanning IPv6 {addr}%{iface}...")
     scope_id = socket.if_nametoindex(iface)
     exception_types = set()
+    scoped_addr = f"{addr}%{iface}"
 
     for port in ports:
         try:
             s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             s.settimeout(timeout)
-            r = s.connect_ex((addr, port, 0, scope_id))
+            r = s.connect_ex((scoped_addr, port, 0, scope_id))
             s.close()
             if r == 0:
                 print(f"  [OPEN] {port}")
