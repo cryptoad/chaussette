@@ -182,14 +182,13 @@ def mac_to_ipv6_link_local(mac_bytes):
     eui64[5:8] = mac[3:6]
 
     parts = [
-        0xfe80,
         (eui64[0] << 8) | eui64[1],
         (eui64[2] << 8) | eui64[3],
         (eui64[4] << 8) | eui64[5],
         (eui64[6] << 8) | eui64[7],
     ]
     addr = ":".join(f"{p:x}" for p in parts)
-    return addr
+    return f"fe80::{addr}"
 
 
 def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT):
