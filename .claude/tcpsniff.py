@@ -3,6 +3,7 @@ import socket
 import struct
 import time
 import subprocess
+import sys
 
 DISPLAY_LEN = 128
 
@@ -30,10 +31,13 @@ def hexdump(data):
     return "\n".join(lines)
 
 def main():
+    # Parse duration argument
+    duration = float(sys.argv[1]) if len(sys.argv) > 1 else 15.0
+
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
-    print("\nCapturing TCP/UDP packets for 10 seconds...\n")
-    end = time.time() + 10
+    print(f"\nCapturing TCP/UDP packets for {duration} seconds...\n")
+    end = time.time() + duration
 
     while time.time() < end:
         packet, addr = sock.recvfrom(65535)
@@ -62,11 +66,10 @@ def main():
         src_ip = socket.inet_ntoa(iph[8])
         dst_ip = socket.inet_ntoa(iph[9])
 
-        # Log IP + MAC of the packet always
         proto_name = "TCP" if protocol == 6 else "UDP"
         print(f"\n[{proto_name}] {src_ip} ({src_mac})  →  {dst_ip} ({dst_mac})")
 
-        # Only output content if either side is local
+        # Only display content if it is local traffic
         if src_ip not in LOCAL_IPS and dst_ip not in LOCAL_IPS:
             continue
 
