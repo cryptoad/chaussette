@@ -15,8 +15,8 @@ def main():
     # Raw AF_PACKET socket to capture all Ethernet frames
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
-    print("Capturing packets for 10 seconds...\n")
-    end = time.time() + 10
+    print("Capturing packets for 5 seconds...\n")
+    end = time.time() + 5
 
     while time.time() < end:
         packet, addr = sock.recvfrom(65535)
