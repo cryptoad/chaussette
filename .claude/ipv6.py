@@ -208,7 +208,8 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT):
                 print(f"  [OPEN] {port}")
         except Exception as e:
             exception_types.add(type(e).__name__)
-            pass
+            print(e)
+            return
 
     if exception_types:
         print("\n[!] Exceptions encountered:")
