@@ -70,7 +70,7 @@ def main():
         print(f"\n[{proto_name}] {src_ip} ({src_mac})  →  {dst_ip} ({dst_mac})")
 
         # Only display content if it is local traffic
-        if src_ip not in LOCAL_IPS and dst_ip not in LOCAL_IPS:
+        if src_ip in LOCAL_IPS or dst_ip in LOCAL_IPS:
             continue
 
         # --- Extract IP layer and above ---
