@@ -32,7 +32,7 @@ def hexdump(data):
 
 def main():
     # Parse duration argument
-    duration = float(sys.argv[1]) if len(sys.argv) > 1 else 15.0
+    duration = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
 
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
@@ -67,7 +67,6 @@ def main():
         dst_ip = socket.inet_ntoa(iph[9])
 
         proto_name = "TCP" if protocol == 6 else "UDP"
-        print(f"\n[{proto_name}] {src_ip} ({src_mac})  →  {dst_ip} ({dst_mac})")
 
         # Only display content if it is local traffic
         if src_ip in LOCAL_IPS or dst_ip in LOCAL_IPS:
@@ -76,6 +75,7 @@ def main():
         # --- Extract IP layer and above ---
         ip_and_up = packet[ip_start:]
 
+        print(f"\n[{proto_name}] {src_ip} ({src_mac})  →  {dst_ip} ({dst_mac})")
         print(f"--- Showing first {DISPLAY_LEN} bytes of IP-layer data ---")
         print(hexdump(ip_and_up))
 
