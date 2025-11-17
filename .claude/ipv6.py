@@ -31,7 +31,7 @@ COMMON_TCP_PORTS = [
     15004
 ]
 
-SCAN_PORTS = range(4096+2048, 4096+2048+4096) #COMMON_TCP_PORTS
+SCAN_PORTS = range(10240, 10240+8192) #COMMON_TCP_PORTS
 SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 
@@ -174,7 +174,7 @@ def scan_one_port(scoped_addr, scope_id, port, timeout):
         return None, type(e).__name__
 
 
-def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=100):
+def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=200):
     print(f"\n[+] Scanning IPv6 {addr}%{iface}...")
     scope_id = socket.if_nametoindex(iface)
     scoped_addr = f"{addr}%{iface}"
