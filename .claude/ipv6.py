@@ -33,10 +33,10 @@ COMMON_TCP_PORTS = [
 ]
 
 SCAN_PORTS = COMMON_TCP_PORTS
-SCAN_TIMEOUT = 0.2
+SCAN_TIMEOUT = 0.5
 SNIFF_TIMEOUT = 5.0
 
-RETRYABLE_ERRNOS = {errno.EAGAIN}
+RETRYABLE_ERRNOS = {errno.EAGAIN, errno.EALREADY}
 
 
 # =====================================================================
@@ -196,7 +196,7 @@ def scan_one_port(scoped_addr, scope_id, port, timeout, max_retries=1):
         return None, errno_to_name(rc)
 
 
-def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=100):
+def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=30):
     print(f"\n[+] Scanning IPv6 {addr}%{iface}...")
     scope_id = socket.if_nametoindex(iface)
     scoped_addr = f"{addr}%{iface}"
