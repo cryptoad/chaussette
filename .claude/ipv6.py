@@ -20,7 +20,7 @@ COMMON_TCP_PORTS = [
     143, 161, 162,
     389, 443, 445, 465, 514, 587,
     631, 636, 873, 993, 995,
-    1080, 1433, 1521, 2049,
+    1080, 1433, 1521, 2024, 2049,
     2181, 2379, 2380,
     3306, 3389, 3690, 4443, 4500,
     5000, 5001, 5432, 5672,
@@ -32,7 +32,7 @@ COMMON_TCP_PORTS = [
     15004
 ]
 
-SCAN_PORTS = range(32778, 32868 + 16384)
+SCAN_PORTS = COMMON_TCP_PORTS
 SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 
@@ -180,7 +180,7 @@ def scan_one_port(scoped_addr, scope_id, port, timeout):
         return None, f"EXC:{type(e).__name__}"
 
 
-def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=200):
+def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=100):
     print(f"\n[+] Scanning IPv6 {addr}%{iface}...")
     scope_id = socket.if_nametoindex(iface)
     scoped_addr = f"{addr}%{iface}"
