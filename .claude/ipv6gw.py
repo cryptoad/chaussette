@@ -82,7 +82,7 @@ def main():
         for fut in concurrent.futures.as_completed(futs):
             port, status = fut.result()
             results[port] = status
-            print(f"{port:5d} → {status}")
+            #print(f"{port:5d} → {status}")
 
     print("\n=== SUMMARY ===")
     for p in sorted(results):
