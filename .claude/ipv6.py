@@ -6,6 +6,7 @@ import fcntl
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import errno
 
 ETH_P_IP = 0x0800
 SIOCGIFADDR = 0x8915
@@ -31,7 +32,7 @@ COMMON_TCP_PORTS = [
     15004
 ]
 
-SCAN_PORTS = range(16384, 32768) #COMMON_TCP_PORTS
+SCAN_PORTS = range(32778, 32868 + 16384)
 SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 
@@ -158,20 +159,25 @@ def mac_to_ipv6_link_local(mac_bytes):
     return f"fe80::{addr}"
 
 
-# -------------------------------------------------------------
-#   PARALLEL SCANNING
-# -------------------------------------------------------------
+# =====================================================================
+# PARALLEL SCANNING — USING connect_ex ERRNO CODES (NO NETWORK EXCEPTIONS)
+# =====================================================================
 def scan_one_port(scoped_addr, scope_id, port, timeout):
     try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
         s.settimeout(timeout)
-        r = s.connect_ex((scoped_addr, port, 0, scope_id))
+        rc = s.connect_ex((scoped_addr, port, 0, scope_id))
         s.close()
-        if r == 0:
-            return port, None  # open
-        return None, None
+
+        if rc == 0:
+            return port, None  # OPEN
+
+        # Return errno code for closed, timeout, unreachable, etc.
+        return None, rc
+
     except Exception as e:
-        return None, type(e).__name__
+        # Only true Python errors (bad address, interface missing, etc.)
+        return None, f"EXC:{type(e).__name__}"
 
 
 def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=200):
@@ -179,7 +185,7 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=200):
     scope_id = socket.if_nametoindex(iface)
     scoped_addr = f"{addr}%{iface}"
 
-    exception_types = set()
+    error_codes = set()
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {
@@ -189,18 +195,22 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=200):
 
         for fut in as_completed(futures):
             port = futures[fut]
-            open_port, exc = fut.result()
+            open_port, err = fut.result()
+
             if open_port:
                 print(f"  [OPEN] {open_port}")
-            if exc:
-                exception_types.add(exc)
 
-    if exception_types:
-        print("\n[!] Exceptions encountered:")
-        for t in sorted(exception_types):
-            print("   -", t)
+            if err is not None:
+                error_codes.add(err)
+
+    print("\n[+] Scan complete.")
+
+    if error_codes:
+        print("\n[!] connect_ex() return codes / errors seen:")
+        for e in sorted(error_codes, key=str):
+            print(f"   - {e}")
     else:
-        print("\n[+] No exceptions encountered.")
+        print("[+] No errors returned by connect_ex()")
 
 
 def main():
