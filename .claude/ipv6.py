@@ -197,7 +197,7 @@ def scan_one_port(scoped_addr, scope_id, port, timeout, max_retries=1):
         return None, errno_to_name(rc)
 
 
-def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=30):
+def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=1):
     print(f"\n[+] Scanning IPv6 {addr}%{iface}...")
     scope_id = socket.if_nametoindex(iface)
     scoped_addr = f"{addr}%{iface}"
