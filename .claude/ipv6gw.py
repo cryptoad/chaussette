@@ -36,7 +36,7 @@ def get_linklocal_iface():
 # -------------------------------------------------------------------
 # Attempt TCP connect, classify outcome
 # -------------------------------------------------------------------
-def check_port(addr, port, iface, timeout=0.4):
+def check_port(addr, port, iface, timeout=1.0):
     sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     sock.settimeout(timeout)
 
@@ -67,8 +67,8 @@ def main():
     print(f"[+] Interface: {iface}")
     print(f"[+] Link-local: {linklocal}%{iface}")
 
-    target = "fe80::1"
-    print(f"[+] Scanning fe80::1%{iface} across {len(KNOWN_PORTS)} ports...\n")
+    target = "fe80::"
+    print(f"[+] Scanning fe80::%{iface} across {len(KNOWN_PORTS)} ports...\n")
 
     results = {}
 
