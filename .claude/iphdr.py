@@ -27,7 +27,7 @@ IPPROTO_TCP = socket.IPPROTO_TCP
 
 # ---- Config -------------------------------------------------------------
 
-SRC_PORT = 40000          # Source TCP port we use for all probes
+SRC_PORT = 2024          # Source TCP port we use for all probes
 SCAN_TIMEOUT = 5.0        # Seconds to wait for responses overall
 SEND_WORKERS = 50         # Thread pool size for sending SYNs
 
@@ -44,7 +44,7 @@ PORTS_TO_SCAN = [
     15000, 15001, 15006, 15010, 15012, 15014,  # Istio/Envoy ports
     8080, 9090, 9091, 9100,
     # ...add more here...
-] + list(range(15000, 15100))
+]
 
 # ---- Helpers: IP / interface / gateway ----------------------------------
 
