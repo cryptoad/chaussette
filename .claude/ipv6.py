@@ -178,6 +178,7 @@ def mac_to_ipv6_link_local(mac_bytes):
 def scan_one_port(scoped_addr, scope_id, port, timeout, max_retries=1):
     """connect_ex with retry on EAGAIN, returns (open_port, error_name_or_None)"""
     s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    s.setblocking(True)
     s.settimeout(timeout)
 
     tries = 0
