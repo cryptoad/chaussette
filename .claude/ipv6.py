@@ -33,7 +33,7 @@ COMMON_TCP_PORTS = [
 ]
 
 SCAN_PORTS = COMMON_TCP_PORTS
-SCAN_TIMEOUT = 0.5
+SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 
 RETRYABLE_ERRNOS = {errno.EAGAIN, errno.EALREADY}
@@ -175,7 +175,7 @@ def mac_to_ipv6_link_local(mac_bytes):
 # PARALLEL PORT SCANNING
 # =====================================================================
 
-def scan_one_port(scoped_addr, scope_id, port, timeout, max_retries=1):
+def scan_one_port(scoped_addr, port, timeout, max_retries=1):
     """connect_ex with retry on EAGAIN, returns (open_port, error_name_or_None)"""
     s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     s.setblocking(True)
@@ -183,7 +183,7 @@ def scan_one_port(scoped_addr, scope_id, port, timeout, max_retries=1):
 
     tries = 0
     while True:
-        rc = s.connect_ex((scoped_addr, port, 0, scope_id))
+        rc = s.connect_ex((scoped_addr, port, 0, 0))
 
         if rc == 0:
             s.close()
@@ -199,14 +199,13 @@ def scan_one_port(scoped_addr, scope_id, port, timeout, max_retries=1):
 
 def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=1):
     print(f"\n[+] Scanning IPv6 {addr}%{iface}...")
-    scope_id = socket.if_nametoindex(iface)
     scoped_addr = f"{addr}%{iface}"
 
     error_counts = {}
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {
-            ex.submit(scan_one_port, scoped_addr, scope_id, port, timeout): port
+            ex.submit(scan_one_port, scoped_addr, port, timeout): port
             for port in ports
         }
 
