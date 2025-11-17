@@ -36,6 +36,19 @@ SCAN_PORTS = COMMON_TCP_PORTS
 SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 
+RETRYABLE_ERRNOS = {errno.EAGAIN}
+
+
+# =====================================================================
+# UTILITIES
+# =====================================================================
+
+def errno_to_name(rc):
+    """Convert a connect_ex return code into a readable errno name."""
+    if isinstance(rc, str) and rc.startswith("EXC:"):
+        return rc
+    return errno.errorcode.get(rc, f"ERR_{rc}")
+
 
 def get_local_ipv4_from_hostname():
     out = subprocess.check_output(["hostname", "-I"], text=True).strip()
@@ -108,8 +121,8 @@ def sniff_gateway_mac(iface, gw_ip, timeout=SNIFF_TIMEOUT):
         remaining = timeout - (time.time() - start)
         if remaining <= 0:
             break
-        s.settimeout(remaining)
 
+        s.settimeout(remaining)
         try:
             pkt, addr = s.recvfrom(65535)
         except socket.timeout:
@@ -119,9 +132,8 @@ def sniff_gateway_mac(iface, gw_ip, timeout=SNIFF_TIMEOUT):
             continue
 
         eth_src = pkt[6:12]
-        eth_dst = pkt[0:6]
-
         ip_hdr = pkt[14:]
+
         if ip_hdr[0] >> 4 != 4:
             continue
 
@@ -134,7 +146,7 @@ def sniff_gateway_mac(iface, gw_ip, timeout=SNIFF_TIMEOUT):
 
         if dst_ip == gw_bytes:
             s.close()
-            return eth_dst, False
+            return pkt[0:6], False
 
     s.close()
     return None, None
@@ -160,24 +172,28 @@ def mac_to_ipv6_link_local(mac_bytes):
 
 
 # =====================================================================
-# PARALLEL SCANNING — USING connect_ex ERRNO CODES (NO NETWORK EXCEPTIONS)
+# PARALLEL PORT SCANNING
 # =====================================================================
-def scan_one_port(scoped_addr, scope_id, port, timeout):
-    try:
-        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-        s.settimeout(timeout)
+
+def scan_one_port(scoped_addr, scope_id, port, timeout, max_retries=1):
+    """connect_ex with retry on EAGAIN, returns (open_port, error_name_or_None)"""
+    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+
+    tries = 0
+    while True:
         rc = s.connect_ex((scoped_addr, port, 0, scope_id))
-        s.close()
 
         if rc == 0:
-            return port, None  # OPEN
+            s.close()
+            return port, None
 
-        # Return errno code for closed, timeout, unreachable, etc.
-        return None, rc
+        if rc in RETRYABLE_ERRNOS and tries < max_retries:
+            tries += 1
+            continue
 
-    except Exception as e:
-        # Only true Python errors (bad address, interface missing, etc.)
-        return None, f"EXC:{type(e).__name__}"
+        s.close()
+        return None, errno_to_name(rc)
 
 
 def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=100):
@@ -185,7 +201,7 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=100):
     scope_id = socket.if_nametoindex(iface)
     scoped_addr = f"{addr}%{iface}"
 
-    error_codes = set()
+    error_counts = {}
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {
@@ -200,18 +216,22 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=100):
             if open_port:
                 print(f"  [OPEN] {open_port}")
 
-            if err is not None:
-                error_codes.add(err)
+            if err:
+                error_counts[err] = error_counts.get(err, 0) + 1
 
     print("\n[+] Scan complete.")
 
-    if error_codes:
-        print("\n[!] connect_ex() return codes / errors seen:")
-        for e in sorted(error_codes, key=str):
-            print(f"   - {e}")
+    if error_counts:
+        print("\n[!] connect_ex() error summary:")
+        for name, count in sorted(error_counts.items()):
+            print(f"   - {name}: {count} time(s)")
     else:
         print("[+] No errors returned by connect_ex()")
 
+
+# =====================================================================
+# MAIN
+# =====================================================================
 
 def main():
     if os.geteuid() != 0:
