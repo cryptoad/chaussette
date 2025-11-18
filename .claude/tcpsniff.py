@@ -7,8 +7,21 @@ import sys
 
 DISPLAY_LEN = 128
 
+# Minimal protocol name map
+PROTO_NAMES = {
+    1: "ICMP",
+    2: "IGMP",
+    4: "IP-in-IP",
+    6: "TCP",
+    17: "UDP",
+    41: "IPv6",
+    47: "GRE",
+    50: "ESP",
+    51: "AH",
+    89: "OSPF",
+}
+
 def get_local_ips():
-    """Return a set of all local IPs from hostname -I."""
     out = subprocess.check_output(["hostname", "-I"], text=True).strip()
     return set(out.split())
 
@@ -16,7 +29,6 @@ LOCAL_IPS = get_local_ips()
 print("Local IPs:", LOCAL_IPS)
 
 def mac_addr(raw):
-    """Convert 6-byte binary MAC to human-readable form."""
     return ":".join(f"{b:02x}" for b in raw)
 
 def hexdump(data):
@@ -24,19 +36,17 @@ def hexdump(data):
     hex_bytes = data.hex()
     byte_list = [hex_bytes[i:i+2] for i in range(0, len(hex_bytes), 2)]
     lines = []
-
     for i in range(0, len(byte_list), 16):
         lines.append(" ".join(byte_list[i:i+16]))
-
     return "\n".join(lines)
 
 def main():
-    # Parse duration argument
     duration = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
 
+    # ETH_P_ALL = 3 (in network byte order)
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
 
-    print(f"\nCapturing TCP/UDP packets for {duration} seconds...\n")
+    print(f"\nCapturing ANY IPv4 protocol for {duration} seconds...\n")
     end = time.time() + duration
 
     while time.time() < end:
@@ -54,28 +64,34 @@ def main():
 
         # --- IP header ---
         ip_start = 14
+        if len(packet) < ip_start + 20:
+            continue
+
         ip_header = packet[ip_start:ip_start+20]
         iph = struct.unpack("!BBHHHBBH4s4s", ip_header)
 
+        version = iph[0] >> 4
         ihl = (iph[0] & 0x0F) * 4
-        protocol = iph[6]  # 6 = TCP, 17 = UDP
+        protocol = iph[6]
 
-        if protocol not in (6, 17):
+        if version != 4:
             continue
 
+        # Parse addresses
         src_ip = socket.inet_ntoa(iph[8])
         dst_ip = socket.inet_ntoa(iph[9])
 
-        proto_name = "TCP" if protocol == 6 else "UDP"
-
-        # Only display content if it is local traffic
-        if src_ip in LOCAL_IPS or dst_ip in LOCAL_IPS:
+        # Skip local-local traffic
+        if src_ip in LOCAL_IPS and dst_ip in LOCAL_IPS:
             continue
 
-        # --- Extract IP layer and above ---
+        proto_name = PROTO_NAMES.get(protocol, f"PROTO-{protocol}")
+
+        # Full IP payload including L4 header
         ip_and_up = packet[ip_start:]
 
         print(f"\n[{proto_name}] {src_ip} ({src_mac})  →  {dst_ip} ({dst_mac})")
+        print(f"Protocol: {protocol}  IHL: {ihl} bytes")
         print(f"--- Showing first {DISPLAY_LEN} bytes of IP-layer data ---")
         print(hexdump(ip_and_up))
 
