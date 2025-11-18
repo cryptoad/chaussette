@@ -37,6 +37,7 @@ AF_INET6 = socket.AF_INET6
 
 # struct ndmsg { u8 fam; u8 pad1; u16 pad2; int ifindex; u16 state; u8 flags; u8 type }
 NDMSG_STRUCT = "BBHiHBB"
+RTN_UNICAST = 1
 
 NUD_PERMANENT = 0x80
 
@@ -61,7 +62,7 @@ def add_permanent_ipv6_neighbor(iface, ipv6_addr, mac_bytes):
         ifindex,        # ifindex
         NUD_PERMANENT,  # state
         0,              # flags (must be 0 here)
-        0               # type
+        RTN_UNICAST     # type
     )
 
     attrs = nla(NDA_DST, dst_bin) + nla(NDA_LLADDR, mac_bytes)
