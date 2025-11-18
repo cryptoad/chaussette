@@ -26,74 +26,6 @@ SCAN_TIMEOUT = 0.2
 SNIFF_TIMEOUT = 5.0
 RETRYABLE_ERRNOS = {errno.EAGAIN, errno.EALREADY}
 
-# ------------------------- Netlink constants -------------------------
-
-NLMSG_ERROR = 2
-NLM_F_REQUEST = 1
-NLM_F_CREATE  = 0x400
-NLM_F_REPLACE = 0x100
-RTM_NEWNEIGH  = 28
-AF_INET6 = socket.AF_INET6
-
-# struct ndmsg { u8 fam; u8 pad1; u16 pad2; int ifindex; u16 state; u8 flags; u8 type }
-NDMSG_STRUCT = "BBHiHBB"
-RTN_UNICAST = 1
-
-NUD_PERMANENT = 0x80
-
-NLA_HDR = "HH"
-NDA_DST = 1
-NDA_LLADDR = 2
-
-def nla(attr_type, payload):
-    l = 4 + len(payload)
-    pad = (4 - (l % 4)) % 4
-    return struct.pack(NLA_HDR, l, attr_type) + payload + (b"\x00" * pad)
-
-def add_permanent_ipv6_neighbor(iface, ipv6_addr, mac_bytes):
-    ifindex = socket.if_nametoindex(iface)
-    dst_bin = socket.inet_pton(AF_INET6, ipv6_addr)
-
-    ndmsg = struct.pack(
-        NDMSG_STRUCT,
-        AF_INET6,       # family
-        0,              # pad1
-        0,              # pad2
-        ifindex,        # ifindex
-        NUD_PERMANENT,  # state
-        0,              # flags (must be 0 here)
-        RTN_UNICAST     # type
-    )
-
-    attrs = nla(NDA_DST, dst_bin) + nla(NDA_LLADDR, mac_bytes)
-
-    NLMSG_HDR = "IHHII"
-    nlmsg_len = struct.calcsize(NLMSG_HDR) + len(ndmsg) + len(attrs)
-
-    nlmsg = struct.pack(
-        NLMSG_HDR,
-        nlmsg_len,
-        RTM_NEWNEIGH,
-        NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE,
-        1,
-        os.getpid()
-    )
-
-    msg = nlmsg + ndmsg + attrs
-
-    s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
-    s.bind((0, 0))
-    s.send(msg)
-    resp = s.recv(65535)
-
-    _, msg_type, _, _, _ = struct.unpack_from(NLMSG_HDR, resp, 0)
-    if msg_type == NLMSG_ERROR:
-        errno_val = struct.unpack_from("i", resp, struct.calcsize(NLMSG_HDR))[0]
-        if errno_val != 0:
-            raise OSError(errno_val, os.strerror(errno_val))
-
-    s.close()
-
 # ------------------------- Utilities -------------------------
 
 def errno_to_name(rc):
@@ -269,10 +201,6 @@ def main():
 
     print(f"[+] Local LL IPv6: {local_ll}%{iface}")
     print(f"[+] GW LL IPv6:    {gw_ll}%{iface}")
-
-    print("[+] Installing permanent IPv6 neighbor entry...")
-    add_permanent_ipv6_neighbor(iface, gw_ll, gw_mac)
-    print("[+] Neighbor added.")
 
     scan_ipv6_ports(gw_ll, iface, SCAN_PORTS)
 
