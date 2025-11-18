@@ -35,7 +35,9 @@ NLM_F_REPLACE = 0x100
 RTM_NEWNEIGH  = 28
 AF_INET6 = socket.AF_INET6
 
-NDMSG_STRUCT = "BxHiHBB"
+# struct ndmsg { u8 fam; u8 pad1; u16 pad2; int ifindex; u16 state; u8 flags; u8 type }
+NDMSG_STRUCT = "BBHiHBB"
+
 NUD_PERMANENT = 0x80
 NTF_SELF = 0x02
 
@@ -54,11 +56,13 @@ def add_permanent_ipv6_neighbor(iface, ipv6_addr, mac_bytes):
 
     ndmsg = struct.pack(
         NDMSG_STRUCT,
-        AF_INET6,
-        ifindex,
-        NUD_PERMANENT,
-        NTF_SELF,
-        0
+        AF_INET6,       # family
+        0,              # pad1
+        0,              # pad2
+        ifindex,        # ifindex
+        NUD_PERMANENT,  # state
+        NTF_SELF,       # flags
+        0               # type
     )
 
     attrs = nla(NDA_DST, dst_bin) + nla(NDA_LLADDR, mac_bytes)
@@ -81,11 +85,13 @@ def add_permanent_ipv6_neighbor(iface, ipv6_addr, mac_bytes):
     s.bind((0, 0))
     s.send(msg)
     resp = s.recv(65535)
+
     _, msg_type, _, _, _ = struct.unpack_from(NLMSG_HDR, resp, 0)
     if msg_type == NLMSG_ERROR:
         errno_val = struct.unpack_from("i", resp, struct.calcsize(NLMSG_HDR))[0]
         if errno_val != 0:
             raise OSError(errno_val, os.strerror(errno_val))
+
     s.close()
 
 # ------------------------- Utilities -------------------------
@@ -112,6 +118,7 @@ def get_iface_ipv4(iface):
 def get_default_gateway_for_ip(local_ip):
     with open("/proc/net/route","r") as f:
         lines = f.readlines()[1:]
+
     for line in lines:
         fields = line.strip().split()
         iface, dst, gw, flags = fields[0], fields[1], fields[2], int(fields[3],16)
@@ -121,11 +128,13 @@ def get_default_gateway_for_ip(local_ip):
                     return iface, socket.inet_ntoa(struct.pack("<L", int(gw,16)))
             except OSError:
                 pass
+
     for line in lines:
         fields = line.strip().split()
         iface, dst, gw, flags = fields[0], fields[1], fields[2], int(fields[3],16)
         if dst=="00000000" and (flags & 0x2):
             return iface, socket.inet_ntoa(struct.pack("<L", int(gw,16)))
+
     raise RuntimeError("No gateway")
 
 def get_local_mac(iface):
@@ -226,7 +235,7 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=1):
     if errors:
         print("\n[!] connect_ex() error summary:")
         for n,c in sorted(errors.items()):
-            print(f"   - {n}: {c} time(s)")
+            print(f"   - {n}: {c}")
     else:
         print("[+] No errors.")
 
