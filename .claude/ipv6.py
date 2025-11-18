@@ -39,7 +39,6 @@ AF_INET6 = socket.AF_INET6
 NDMSG_STRUCT = "BBHiHBB"
 
 NUD_PERMANENT = 0x80
-NTF_SELF = 0x02
 
 NLA_HDR = "HH"
 NDA_DST = 1
@@ -61,7 +60,7 @@ def add_permanent_ipv6_neighbor(iface, ipv6_addr, mac_bytes):
         0,              # pad2
         ifindex,        # ifindex
         NUD_PERMANENT,  # state
-        NTF_SELF,       # flags
+        0,              # flags (must be 0 here)
         0               # type
     )
 
@@ -234,7 +233,7 @@ def scan_ipv6_ports(addr, iface, ports, timeout=SCAN_TIMEOUT, workers=1):
     print("\n[+] Scan complete.")
     if errors:
         print("\n[!] connect_ex() error summary:")
-        for n,c in sorted(errors.items()):
+        for n, c in sorted(errors.items()):
             print(f"   - {n}: {c}")
     else:
         print("[+] No errors.")
