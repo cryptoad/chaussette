@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "hostname -I;cat /proc/net/if_inet6;ps auxww"
+            "command": "hostname -I;cat /proc/net/if_inet6;pstree -al"
           }
         ]
       }
