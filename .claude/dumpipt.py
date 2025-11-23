@@ -9,6 +9,7 @@ CAP_NET_ADMIN (for gVisor, pass --net-raw).
 import ctypes
 import os
 import socket
+from errno import ENOMEM
 
 # Constants from linux/netfilter_ipv4/ip_tables.h.
 SOL_IP = socket.SOL_IP
@@ -37,6 +38,13 @@ class IPTGetEntries(ctypes.Structure):
     ]
 
 
+class XTCounters(ctypes.Structure):
+    _fields_ = [
+        ("pcnt", ctypes.c_uint64),
+        ("bcnt", ctypes.c_uint64),
+    ]
+
+
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
 
@@ -55,16 +63,26 @@ def _get_info(sock, table_name):
     return _getsockopt(sock, SOL_IP, IPT_SO_GET_INFO, info)
 
 
-def _get_entries(sock, table_name, size):
+def _get_entries(sock, table_name, size, num_entries):
     header_size = ctypes.sizeof(IPTGetEntries)
-    buf = ctypes.create_string_buffer(header_size + size)
+    counters_size = num_entries * ctypes.sizeof(XTCounters)
+
+    # The kernel may append xt_counters after the entry table. Allocate space
+    # for those counters up front; otherwise IPT_SO_GET_ENTRIES can fail with
+    # ENOMEM if info.size does not account for the counters region.
+    buf = ctypes.create_string_buffer(header_size + size + counters_size)
     entries = IPTGetEntries.from_buffer(buf)
     entries.name = table_name
     entries.size = size
 
     buflen = ctypes.c_uint(len(buf))
-    if libc.getsockopt(sock.fileno(), SOL_IP, IPT_SO_GET_ENTRIES, ctypes.byref(entries), ctypes.byref(buflen)) != 0:
+    ret = libc.getsockopt(sock.fileno(), SOL_IP, IPT_SO_GET_ENTRIES, ctypes.byref(entries), ctypes.byref(buflen))
+    if ret != 0:
         errno = ctypes.get_errno()
+        # If we somehow still sized the buffer too small, retry with the size
+        # requested by the kernel (stored in entries.size).
+        if errno == ENOMEM and entries.size > size:
+            return _get_entries(sock, table_name, entries.size, num_entries)
         raise OSError(errno, os.strerror(errno))
 
     return bytes(buf)[header_size:header_size + size]
@@ -90,7 +108,7 @@ def dump_table(sock, table):
     print(f"{table}: entries={info.num_entries}, bytes={info.size}")
 
     try:
-        raw_entries = _get_entries(sock, table_bytes, info.size)
+        raw_entries = _get_entries(sock, table_bytes, info.size, info.num_entries)
     except OSError as e:
         print(f"{table}: failed to get entries: {e}")
         return
