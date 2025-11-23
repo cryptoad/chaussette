@@ -125,6 +125,10 @@ class IP6TEntry(ctypes.Structure):
     _fields_ = [
         ("ip", IP6TIP),
         ("nfcache", ctypes.c_uint),
+        # Kernel structs are 8-byte aligned because of the trailing
+        # xt_counters (u64 fields). Add an explicit pad so the ctypes offsets
+        # match the kernel layout and target/next offsets are read correctly.
+        ("_pad", ctypes.c_uint),
         ("target_offset", ctypes.c_uint16),
         ("next_offset", ctypes.c_uint16),
         ("comefrom", ctypes.c_uint),
