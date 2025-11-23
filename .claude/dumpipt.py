@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 """Minimal iptables dumper for gVisor debugging.
 
-This script queries IPT_SO_GET_INFO and IPT_SO_GET_ENTRIES for a set of
-iptables tables, starting with the nat table. It requires CAP_NET_RAW or
-CAP_NET_ADMIN (for gVisor, pass --net-raw).
+This script queries IPT_SO_GET_INFO/IP6T_SO_GET_INFO and
+IPT_SO_GET_ENTRIES/IP6T_SO_GET_ENTRIES for a set of iptables and ip6tables
+tables, starting with the nat table. It requires CAP_NET_RAW or CAP_NET_ADMIN
+(for gVisor, pass --net-raw). Pass --raw-entries to include the raw hex dump of
+the tables.
 """
 
+import argparse
 import ctypes
 import ipaddress
 import os
 import socket
 from errno import ENOMEM
 
-# Constants from linux/netfilter_ipv4/ip_tables.h.
+# Constants from linux/netfilter_ipv4/ip_tables.h and
+# linux/netfilter_ipv6/ip6_tables.h.
 SOL_IP = socket.SOL_IP
+SOL_IPV6 = socket.IPPROTO_IPV6
 IPT_SO_GET_INFO = 64  # IPT_BASE_CTL
 IPT_SO_GET_ENTRIES = IPT_SO_GET_INFO + 1
+IP6T_SO_GET_INFO = 64  # IP6T_BASE_CTL
+IP6T_SO_GET_ENTRIES = IP6T_SO_GET_INFO + 1
 XT_TABLE_MAXNAMELEN = 32
 NF_IP_NUMHOOKS = 5
+NF_IP6_NUMHOOKS = 5
 IFNAMSIZ = 16
 XT_EXTENSION_MAXNAMELEN = 29
 
@@ -92,6 +100,57 @@ class XTEntryTarget(ctypes.Structure):
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
 
+class IP6TIP(ctypes.Structure):
+    _fields_ = [
+        ("src", ctypes.c_ubyte * 16),
+        ("dst", ctypes.c_ubyte * 16),
+        ("smsk", ctypes.c_ubyte * 16),
+        ("dmsk", ctypes.c_ubyte * 16),
+        ("iniface", ctypes.c_char * IFNAMSIZ),
+        ("outiface", ctypes.c_char * IFNAMSIZ),
+        ("iniface_mask", ctypes.c_ubyte * IFNAMSIZ),
+        ("outiface_mask", ctypes.c_ubyte * IFNAMSIZ),
+        ("proto", ctypes.c_uint16),
+        ("tos", ctypes.c_uint8),
+        ("flags", ctypes.c_uint8),
+        ("invflags", ctypes.c_uint8),
+        # Kernel aligns the following fields to 4 bytes; add padding so the
+        # ctypes layout reaches sizeof(struct ip6t_ip6) == 136 bytes, keeping
+        # subsequent offsets consistent with the kernel layout.
+        ("_pad", ctypes.c_ubyte * 3),
+    ]
+
+
+class IP6TEntry(ctypes.Structure):
+    _fields_ = [
+        ("ip", IP6TIP),
+        ("nfcache", ctypes.c_uint),
+        ("target_offset", ctypes.c_uint16),
+        ("next_offset", ctypes.c_uint16),
+        ("comefrom", ctypes.c_uint),
+        ("counters", XTCounters),
+    ]
+
+
+class IP6TGetinfo(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_char * XT_TABLE_MAXNAMELEN),
+        ("valid_hooks", ctypes.c_uint),
+        ("hook_entry", ctypes.c_uint * NF_IP6_NUMHOOKS),
+        ("underflow", ctypes.c_uint * NF_IP6_NUMHOOKS),
+        ("num_entries", ctypes.c_uint),
+        ("size", ctypes.c_uint),
+    ]
+
+
+class IP6TGetEntries(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_char * XT_TABLE_MAXNAMELEN),
+        ("size", ctypes.c_uint),
+        ("entrytable", ctypes.c_ubyte * 0),
+    ]
+
+
 def _getsockopt(sock, level, optname, optval):
     """Wrapper for getsockopt that raises OSError on failure."""
     buflen = ctypes.c_uint(ctypes.sizeof(optval))
@@ -127,6 +186,32 @@ def _get_entries(sock, table_name, size, num_entries):
         # requested by the kernel (stored in entries.size).
         if errno == ENOMEM and entries.size > size:
             return _get_entries(sock, table_name, entries.size, num_entries)
+        raise OSError(errno, os.strerror(errno))
+
+    return bytes(buf)[header_size:header_size + entries.size]
+
+
+def _get_info_v6(sock, table_name):
+    info = IP6TGetinfo()
+    info.name = table_name
+    return _getsockopt(sock, SOL_IPV6, IP6T_SO_GET_INFO, info)
+
+
+def _get_entries_v6(sock, table_name, size, num_entries):
+    header_size = ctypes.sizeof(IP6TGetEntries)
+    counters_size = num_entries * ctypes.sizeof(XTCounters)
+
+    buf = ctypes.create_string_buffer(header_size + size + counters_size)
+    entries = IP6TGetEntries.from_buffer(buf)
+    entries.name = table_name
+    entries.size = size
+
+    buflen = ctypes.c_uint(len(buf))
+    ret = libc.getsockopt(sock.fileno(), SOL_IPV6, IP6T_SO_GET_ENTRIES, ctypes.byref(entries), ctypes.byref(buflen))
+    if ret != 0:
+        errno = ctypes.get_errno()
+        if errno == ENOMEM and entries.size > size:
+            return _get_entries_v6(sock, table_name, entries.size, num_entries)
         raise OSError(errno, os.strerror(errno))
 
     return bytes(buf)[header_size:header_size + entries.size]
@@ -169,6 +254,22 @@ def _format_proto(proto):
         17: "udp",
     }
     return common.get(proto, str(proto))
+
+
+def _ipv6(addr_bytes):
+    return ipaddress.IPv6Address(bytes(addr_bytes))
+
+
+def _format_cidr6(addr_bytes, mask_bytes):
+    mask = bytes(mask_bytes)
+    if not any(mask):
+        return "any"
+
+    try:
+        prefix = ipaddress.IPv6Network((int(_ipv6(addr_bytes)), int(_ipv6(mask))), strict=False).prefixlen
+        return f"{_ipv6(addr_bytes)}/{prefix}"
+    except ValueError:
+        return f"{_ipv6(addr_bytes)} mask {_ipv6(mask)}"
 
 
 def _decode_entries(raw_entries, info):
@@ -238,6 +339,74 @@ def _decode_entries(raw_entries, info):
     return readable
 
 
+def _decode_entries_v6(raw_entries, info):
+    hook_names = {
+        0: "PREROUTING",
+        1: "LOCAL_IN",
+        2: "FORWARD",
+        3: "LOCAL_OUT",
+        4: "POSTROUTING",
+    }
+
+    hook_offsets = {info.hook_entry[i]: hook_names[i] for i in range(NF_IP6_NUMHOOKS) if info.valid_hooks & (1 << i)}
+    underflows = {info.underflow[i]: hook_names[i] for i in range(NF_IP6_NUMHOOKS) if info.valid_hooks & (1 << i)}
+
+    readable = []
+    offset = 0
+    index = 0
+
+    entry_header_size = ctypes.sizeof(IP6TEntry)
+
+    while offset < len(raw_entries) and index < info.num_entries:
+        if len(raw_entries) - offset < entry_header_size:
+            readable.append(f"{offset:04x}: truncated entry header")
+            break
+
+        entry = IP6TEntry.from_buffer_copy(raw_entries, offset)
+
+        if entry.next_offset < entry_header_size:
+            readable.append(f"{offset:04x}: malformed entry with next_offset={entry.next_offset}")
+            break
+
+        if offset + entry.next_offset > len(raw_entries):
+            readable.append(
+                f"{offset:04x}: entry exceeds buffer (next_offset={entry.next_offset}, remaining={len(raw_entries) - offset})"
+            )
+            break
+
+        if entry.target_offset >= entry.next_offset:
+            readable.append(
+                f"{offset:04x}: malformed target_offset={entry.target_offset} (next_offset={entry.next_offset})"
+            )
+            break
+
+        target_offset = offset + entry.target_offset
+        target = XTEntryTarget.from_buffer_copy(raw_entries[target_offset:])
+        target_name = bytes(target.name).split(b"\0", 1)[0].decode(errors="replace")
+
+        if offset in hook_offsets:
+            readable.append(f"[{hook_offsets[offset]} chain]")
+
+        src = _format_cidr6(entry.ip.src, entry.ip.smsk)
+        dst = _format_cidr6(entry.ip.dst, entry.ip.dmsk)
+        proto = _format_proto(entry.ip.proto)
+        iniface = _format_iface(entry.ip.iniface, entry.ip.iniface_mask)
+        outiface = _format_iface(entry.ip.outiface, entry.ip.outiface_mask)
+        tos = entry.ip.tos
+
+        readable.append(
+            f"{index:02d} @ {offset:04x}: src {src} dst {dst} proto {proto} tos {tos} in {iniface} out {outiface} -> {target_name}"
+        )
+
+        if offset in underflows:
+            readable.append(f"[{underflows[offset]} underflow]")
+
+        offset += entry.next_offset
+        index += 1
+
+    return readable
+
+
 def _hexdump(data, width=16):
     lines = []
     for offset in range(0, len(data), width):
@@ -247,7 +416,7 @@ def _hexdump(data, width=16):
     return "\n".join(lines) if lines else "<empty>"
 
 
-def dump_table(sock, table):
+def dump_table(sock, table, show_raw):
     table_bytes = table.encode()
     try:
         info = _get_info(sock, table_bytes)
@@ -266,16 +435,60 @@ def dump_table(sock, table):
     for line in _decode_entries(raw_entries, info):
         print(line)
 
-    print("\nRaw entries:")
-    print(_hexdump(raw_entries))
-    print()
+    if show_raw:
+        print("\nRaw entries:")
+        print(_hexdump(raw_entries))
+        print()
+
+    if not show_raw:
+        print()
+
+
+def dump_table_v6(sock, table, show_raw):
+    table_bytes = table.encode()
+    try:
+        info = _get_info_v6(sock, table_bytes)
+    except OSError as e:
+        print(f"{table} (ip6): failed to get info: {e}")
+        return
+
+    print(f"{table} (ip6): entries={info.num_entries}, bytes={info.size}")
+
+    try:
+        raw_entries = _get_entries_v6(sock, table_bytes, info.size, info.num_entries)
+    except OSError as e:
+        print(f"{table} (ip6): failed to get entries: {e}")
+        return
+
+    for line in _decode_entries_v6(raw_entries, info):
+        print(line)
+
+    if show_raw:
+        print("\nRaw entries:")
+        print(_hexdump(raw_entries))
+        print()
+
+    if not show_raw:
+        print()
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Dump iptables/ip6tables tables (gVisor helper)")
+    parser.add_argument(
+        "--raw-entries",
+        action="store_true",
+        help="Include hexadecimal dump of raw entry data",
+    )
+    args = parser.parse_args()
+
     tables = ["nat", "filter", "mangle", "raw", "security"]
     with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as sock:
         for table in tables:
-            dump_table(sock, table)
+            dump_table(sock, table, args.raw_entries)
+
+    with socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6) as sock6:
+        for table in tables:
+            dump_table_v6(sock6, table, args.raw_entries)
 
 
 if __name__ == "__main__":
