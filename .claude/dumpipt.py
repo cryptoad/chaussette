@@ -123,7 +123,7 @@ def _get_entries(sock, table_name, size, num_entries):
             return _get_entries(sock, table_name, entries.size, num_entries)
         raise OSError(errno, os.strerror(errno))
 
-    return bytes(buf)[header_size:header_size + size]
+    return bytes(buf)[header_size:header_size + entries.size]
 
 
 def _ipv4(addr):
@@ -181,11 +181,29 @@ def _decode_entries(raw_entries, info):
     offset = 0
     index = 0
 
-    while offset < len(raw_entries):
-        entry = IPTEntry.from_buffer_copy(raw_entries[offset:])
+    entry_header_size = ctypes.sizeof(IPTEntry)
 
-        if entry.next_offset == 0:
-            readable.append(f"{offset:04x}: malformed entry with next_offset=0")
+    while offset < len(raw_entries) and index < info.num_entries:
+        if len(raw_entries) - offset < entry_header_size:
+            readable.append(f"{offset:04x}: truncated entry header")
+            break
+
+        entry = IPTEntry.from_buffer_copy(raw_entries, offset)
+
+        if entry.next_offset < entry_header_size:
+            readable.append(f"{offset:04x}: malformed entry with next_offset={entry.next_offset}")
+            break
+
+        if offset + entry.next_offset > len(raw_entries):
+            readable.append(
+                f"{offset:04x}: entry exceeds buffer (next_offset={entry.next_offset}, remaining={len(raw_entries) - offset})"
+            )
+            break
+
+        if entry.target_offset >= entry.next_offset:
+            readable.append(
+                f"{offset:04x}: malformed target_offset={entry.target_offset} (next_offset={entry.next_offset})"
+            )
             break
 
         target_offset = offset + entry.target_offset
