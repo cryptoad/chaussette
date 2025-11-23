@@ -68,6 +68,12 @@ class IPTEntry(ctypes.Structure):
     _fields_ = [
         ("ip", IPTIP),
         ("nfcache", ctypes.c_uint),
+        # Kernel structs are 8-byte aligned due to the trailing xt_counters
+        # (which contains u64 fields). The ipt_entry layout therefore places
+        # target_offset at offset 92 instead of 88. Add an explicit pad to
+        # keep ctypes offsets aligned with the kernel so we read the offsets
+        # correctly.
+        ("_pad", ctypes.c_uint),
         ("target_offset", ctypes.c_uint16),
         ("next_offset", ctypes.c_uint16),
         ("comefrom", ctypes.c_uint),
