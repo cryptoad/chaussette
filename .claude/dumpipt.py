@@ -1,64 +1,50 @@
-#!/usr/bin/env python3
-"""
-Dump iptables (IPv4) entries in a human-readable form inside a gVisor container.
-
-The script queries IPT_SO_GET_INFO and IPT_SO_GET_ENTRIES directly through a raw
-IPv4 socket. It prints table metadata and each rule's matches and target,
-including the decoded standard verdicts (ACCEPT, DROP, RETURN, etc.).
-
-Run inside a gVisor sandbox with --net-raw or otherwise ensure CAP_NET_RAW and
-CAP_NET_ADMIN are present.
-"""
 import ctypes
-import ipaddress
 import socket
 import struct
-from typing import Iterable, List, Tuple
+from typing import Iterable, List
 
-# Constants from linux/netfilter_ipv4/ip_tables.h and x_tables.h
+# Constants from linux/netfilter_ipv4/ip_tables.h and linux/netfilter.h.
 SOL_IP = socket.SOL_IP
-IPT_SO_GET_INFO = 64
-IPT_SO_GET_ENTRIES = IPT_SO_GET_INFO + 1
+IPT_BASE_CTL = 64
+IPT_SO_GET_INFO = IPT_BASE_CTL
+IPT_SO_GET_ENTRIES = IPT_BASE_CTL + 1
 XT_TABLE_MAXNAMELEN = 32
 XT_EXTENSION_MAXNAMELEN = 29
-NF_INET_NUMHOOKS = 5
-XT_STANDARD_TARGET = b""  # "standard" target has an empty name.
-XT_ERROR_TARGET = b"ERROR"
+NF_IP_NUMHOOKS = 5
+IFNAMSIZ = 16
+NF_DROP = 0
+NF_ACCEPT = 1
+NF_QUEUE = 3
+NF_REPEAT = 4
+NF_STOP = 5
+NF_RETURN = -NF_REPEAT - 1
 
+# Hook names correspond to NF_INET_* values.
 HOOK_NAMES = [
     "PREROUTING",
-    "INPUT",
+    "LOCAL_IN",
     "FORWARD",
-    "OUTPUT",
+    "LOCAL_OUT",
     "POSTROUTING",
 ]
-
-VERDICT_STRINGS = {
-    -1: "DROP",
-    -2: "ACCEPT",
-    -3: "QUEUE",
-    -4: "REPEAT",
-    -5: "STOP",
-    -6: "RETURN",
-}
 
 
 class IPTGetinfo(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char * XT_TABLE_MAXNAMELEN),
         ("valid_hooks", ctypes.c_uint),
-        ("hook_entry", ctypes.c_uint * NF_INET_NUMHOOKS),
-        ("underflow", ctypes.c_uint * NF_INET_NUMHOOKS),
+        ("hook_entry", ctypes.c_uint * NF_IP_NUMHOOKS),
+        ("underflow", ctypes.c_uint * NF_IP_NUMHOOKS),
         ("num_entries", ctypes.c_uint),
         ("size", ctypes.c_uint),
     ]
 
 
-class IPTGetEntries(ctypes.Structure):
+class IPTGetEntriesHeader(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char * XT_TABLE_MAXNAMELEN),
         ("size", ctypes.c_uint),
-        ("_pad", ctypes.c_uint),
+        ("entrytable", ctypes.c_ubyte * 0),
     ]
 
 
@@ -68,148 +54,158 @@ class IPTIP(ctypes.Structure):
         ("dst", ctypes.c_uint32),
         ("smask", ctypes.c_uint32),
         ("dmask", ctypes.c_uint32),
-        ("iniface", ctypes.c_char * socket.IFNAMSIZ),
-        ("outiface", ctypes.c_char * socket.IFNAMSIZ),
-        ("iniface_mask", ctypes.c_ubyte * socket.IFNAMSIZ),
-        ("outiface_mask", ctypes.c_ubyte * socket.IFNAMSIZ),
+        ("iniface", ctypes.c_char * IFNAMSIZ),
+        ("outiface", ctypes.c_char * IFNAMSIZ),
+        ("iniface_mask", ctypes.c_ubyte * IFNAMSIZ),
+        ("outiface_mask", ctypes.c_ubyte * IFNAMSIZ),
         ("proto", ctypes.c_uint16),
-        ("flags", ctypes.c_ubyte),
-        ("invflags", ctypes.c_ubyte),
+        ("flags", ctypes.c_uint8),
+        ("invflags", ctypes.c_uint8),
     ]
 
 
 class XTCounters(ctypes.Structure):
-    _fields_ = [
-        ("pcnt", ctypes.c_uint64),
-        ("bcnt", ctypes.c_uint64),
-    ]
+    _fields_ = [("pcnt", ctypes.c_uint64), ("bcnt", ctypes.c_uint64)]
 
 
 class IPTEntry(ctypes.Structure):
     _fields_ = [
         ("ip", IPTIP),
-        ("nfcache", ctypes.c_uint32),
+        ("nfcache", ctypes.c_uint),
         ("target_offset", ctypes.c_uint16),
         ("next_offset", ctypes.c_uint16),
-        ("comefrom", ctypes.c_uint32),
+        ("comefrom", ctypes.c_uint),
         ("counters", XTCounters),
     ]
 
 
-def _decode_ip(addr: int, mask: int) -> str:
-    ip = ipaddress.IPv4Address(addr)
-    if mask == 0:
-        return "any"
-    prefix = ipaddress.IPv4Network((0, mask)).prefixlen
-    return f"{ip}/{prefix}"
+class XTEntryMatch(ctypes.Structure):
+    _fields_ = [
+        ("match_size", ctypes.c_uint16),
+        ("name", ctypes.c_char * XT_EXTENSION_MAXNAMELEN),
+        ("revision", ctypes.c_uint8),
+    ]
 
 
-def _decode_iface(raw_name: bytes, raw_mask: Iterable[int]) -> str:
-    name = raw_name.split(b"\0", 1)[0].decode() if raw_name else ""
-    mask_bytes = bytes(raw_mask)
-    if not name or all(b == 0 for b in mask_bytes):
-        return "*"
-    masked = "".join(ch if mask_bytes[i] else "?" for i, ch in enumerate(name))
-    return masked
+class XTEntryTarget(ctypes.Structure):
+    _fields_ = [
+        ("target_size", ctypes.c_uint16),
+        ("name", ctypes.c_char * XT_EXTENSION_MAXNAMELEN),
+        ("revision", ctypes.c_uint8),
+    ]
 
 
-def _read_matches(payload: bytes, start: int, end: int) -> List[Tuple[str, bytes]]:
-    matches: List[Tuple[str, bytes]] = []
-    offset = start
-    header_size = 2 + XT_EXTENSION_MAXNAMELEN + 1
-    while offset + header_size <= end:
-        (match_size,) = struct.unpack_from("<H", payload, offset)
-        name = payload[offset + 2 : offset + 2 + XT_EXTENSION_MAXNAMELEN]
-        name = name.split(b"\0", 1)[0]
-        revision = payload[offset + 2 + XT_EXTENSION_MAXNAMELEN]
-        data_start = offset + header_size
-        data_end = offset + match_size
-        if match_size == 0 or data_end > end:
-            break
-        matches.append((f"{name.decode()}(rev {revision})", payload[data_start:data_end]))
-        offset = data_end
+class XTStandardTarget(ctypes.Structure):
+    _fields_ = [("target", XTEntryTarget), ("verdict", ctypes.c_int32)]
+
+
+VERDICTS = {
+    -NF_DROP - 1: "DROP",
+    -NF_ACCEPT - 1: "ACCEPT",
+    -NF_QUEUE - 1: "QUEUE",
+    -NF_REPEAT - 1: "REPEAT",
+    -NF_STOP - 1: "STOP",
+    NF_RETURN: "RETURN",
+}
+
+
+def _decode_addr(value: int) -> str:
+    return socket.inet_ntoa(struct.pack("!I", value))
+
+
+def _decode_iface(name: Iterable[int]) -> str:
+    raw = bytes(name)
+    return raw.split(b"\0", 1)[0].decode(errors="ignore")
+
+
+def _decode_target(entry_data: memoryview, target_offset: int) -> str:
+    tgt = XTEntryTarget.from_buffer(entry_data, target_offset)
+    name = tgt.name.split(b"\0", 1)[0].decode(errors="ignore")
+    if not name:
+        std = XTStandardTarget.from_buffer(entry_data, target_offset)
+        return VERDICTS.get(std.verdict, f"verdict {std.verdict}")
+    return name
+
+
+def _decode_matches(entry_data: memoryview, target_offset: int) -> List[str]:
+    matches = []
+    offset = ctypes.sizeof(IPTEntry)
+    while offset < target_offset:
+        match = XTEntryMatch.from_buffer(entry_data, offset)
+        name = match.name.split(b"\0", 1)[0].decode(errors="ignore")
+        matches.append(name)
+        offset += match.match_size
     return matches
 
 
-def _decode_verdict(value: int) -> str:
-    if value == 0xFFFFFFFF:
-        return "CONTINUE"
-    return VERDICT_STRINGS.get(value, str(value))
-
-
-def _read_target(payload: bytes, offset: int) -> Tuple[str, str, bytes]:
-    header_size = 2 + XT_EXTENSION_MAXNAMELEN + 1
-    (target_size,) = struct.unpack_from("<H", payload, offset)
-    name = payload[offset + 2 : offset + 2 + XT_EXTENSION_MAXNAMELEN]
-    name = name.split(b"\0", 1)[0]
-    revision = payload[offset + 2 + XT_EXTENSION_MAXNAMELEN]
-    data_start = offset + header_size
-    data_end = offset + target_size
-    data = payload[data_start:data_end]
-
-    if name == XT_STANDARD_TARGET and len(data) >= 4:
-        (verdict,) = struct.unpack_from("<i", data)
-        verdict = _decode_verdict(verdict)
-        return "standard", verdict, data[4:]
-    if name == XT_ERROR_TARGET:
-        return "error", data.decode(errors="replace"), b""
-    return name.decode() or "unknown", f"rev {revision}", data
-
-
-def _print_entry(index: int, offset: int, entry: IPTEntry, matches, target_desc):
+def _describe_entry(entry: IPTEntry, entry_bytes: memoryview) -> str:
     ip = entry.ip
-    src = _decode_ip(ip.src, ip.smask)
-    dst = _decode_ip(ip.dst, ip.dmask)
-    iniface = _decode_iface(ip.iniface, ip.iniface_mask)
-    outiface = _decode_iface(ip.outiface, ip.outiface_mask)
-    target_name, target_detail, target_data = target_desc
-    print(f"[{index}] offset={offset} next={entry.next_offset} target_off={entry.target_offset}")
-    print(f"     src={src} dst={dst} proto={ip.proto} in={iniface} out={outiface}")
+    parts = []
+    if ip.proto:
+        parts.append(f"proto={ip.proto}")
+    if ip.smask:
+        parts.append(f"src={_decode_addr(ip.src)}/{_decode_addr(ip.smask)}")
+    if ip.dmask:
+        parts.append(f"dst={_decode_addr(ip.dst)}/{_decode_addr(ip.dmask)}")
+    iniface = _decode_iface(ip.iniface)
+    if iniface:
+        parts.append(f"in={iniface}")
+    outiface = _decode_iface(ip.outiface)
+    if outiface:
+        parts.append(f"out={outiface}")
+    matches = _decode_matches(entry_bytes, entry.target_offset)
+    target = _decode_target(entry_bytes, entry.target_offset)
+    parts.append(f"target={target}")
     if matches:
-        print("     matches:")
-        for name, data in matches:
-            print(f"       - {name} ({len(data)} bytes of data)")
-    print(f"     target={target_name}: {target_detail}")
-    if target_data:
-        print(f"       raw target data: {target_data.hex()}")
+        parts.append(f"matches={','.join(matches)}")
+    return ", ".join(parts)
 
 
-def main():
+def main() -> None:
+    # Must run as root with CAP_NET_RAW/CAP_NET_ADMIN (gVisor: pass --net-raw).
     with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as s:
         info = IPTGetinfo()
         info.name = b"nat"
-        info_len = ctypes.c_uint(ctypes.sizeof(info))
-        if ctypes.CDLL("libc.so.6").getsockopt(
-            s.fileno(), SOL_IP, IPT_SO_GET_INFO, ctypes.byref(info), ctypes.byref(info_len)
+        buf_len = ctypes.c_uint(ctypes.sizeof(info))
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.getsockopt(
+            s.fileno(), SOL_IP, IPT_SO_GET_INFO, ctypes.byref(info), ctypes.byref(buf_len)
         ) != 0:
             raise OSError(ctypes.get_errno(), "getsockopt IPT_SO_GET_INFO failed")
 
-        entries_buf = ctypes.create_string_buffer(info.size)
-        entries = IPTGetEntries.from_buffer(entries_buf)
+        header_size = ctypes.sizeof(IPTGetEntriesHeader)
+        entries_buf = ctypes.create_string_buffer(header_size + info.size)
+        entries = IPTGetEntriesHeader.from_buffer(entries_buf)
         entries.name = info.name
         entries.size = info.size
-        buf_len = ctypes.c_uint(entries_buf._length_)
-        if ctypes.CDLL("libc.so.6").getsockopt(
-            s.fileno(), SOL_IP, IPT_SO_GET_ENTRIES, entries_buf, ctypes.byref(buf_len)
+
+        buf_len = ctypes.c_uint(ctypes.sizeof(entries_buf))
+        if libc.getsockopt(
+            s.fileno(), SOL_IP, IPT_SO_GET_ENTRIES, ctypes.byref(entries), ctypes.byref(buf_len)
         ) != 0:
             raise OSError(ctypes.get_errno(), "getsockopt IPT_SO_GET_ENTRIES failed")
 
-    print(f"Table: {entries.name.decode()} valid_hooks=0x{info.valid_hooks:x}")
-    for i, (hook, under) in enumerate(zip(info.hook_entry, info.underflow)):
-        print(f"  {HOOK_NAMES[i]}: entry_offset={hook} underflow_offset={under}")
-    print(f"Entries: {info.num_entries} total_bytes={info.size}\n")
+    entry_data = (ctypes.c_ubyte * info.size).from_buffer(entries_buf, header_size)
+    print(f"Table {info.name.decode()} has {info.num_entries} entries ({info.size} bytes)")
 
-    payload = entries_buf.raw[: entries.size]
-    offset = ctypes.sizeof(IPTGetEntries)
-    index = 0
-    while offset < len(payload):
-        entry = IPTEntry.from_buffer_copy(payload, offset)
-        target_offset = offset + entry.target_offset
-        matches = _read_matches(payload, offset + ctypes.sizeof(IPTEntry), target_offset)
-        target = _read_target(payload, target_offset)
-        _print_entry(index, offset, entry, matches, target)
+    hook_map = {}
+    for idx, off in enumerate(info.hook_entry):
+        if info.valid_hooks & (1 << idx):
+            hook_map.setdefault(off, []).append(f"{HOOK_NAMES[idx]} start")
+    for idx, off in enumerate(info.underflow):
+        if info.valid_hooks & (1 << idx):
+            hook_map.setdefault(off, []).append(f"{HOOK_NAMES[idx]} underflow")
+
+    offset = 0
+    while offset < info.size:
+        view = memoryview(entry_data)[offset:]
+        entry = IPTEntry.from_buffer(view)
+        annotations = hook_map.get(offset)
+        desc = _describe_entry(entry, view)
+        if annotations:
+            print(f"[{offset:5d}] {'; '.join(annotations)}")
+        print(f"[{offset:5d}] {desc}")
         offset += entry.next_offset
-        index += 1
 
 
 if __name__ == "__main__":
