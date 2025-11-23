@@ -5,11 +5,10 @@ import os
 import struct
 
 # --------------------------------------------------------------------
-# Constants (from linux/netfilter_ipv4/ip_tables.h / x_tables.h)
+# Constants (from linux/netfilter_ipv4/ip_tables.h)
 # --------------------------------------------------------------------
 
 SOL_IP = socket.SOL_IP
-
 IPT_BASE_CTL = 64
 IPT_SO_GET_INFO    = IPT_BASE_CTL          # 64
 IPT_SO_GET_ENTRIES = IPT_BASE_CTL + 1      # 65
@@ -45,7 +44,7 @@ HOOK_NAMES_BY_TABLE = {
 }
 
 # --------------------------------------------------------------------
-# Structures – match kernel layout
+# Structure definitions (must match real kernel layout)
 # --------------------------------------------------------------------
 
 class IPTGetinfo(ctypes.Structure):
@@ -62,7 +61,7 @@ class IPTGetEntries(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char * XT_TABLE_MAXNAMELEN),
         ("size", ctypes.c_uint),
-        # ipt_entry[] follows
+        # followed by entries[]
     ]
 
 class IptIp(ctypes.Structure):
@@ -94,103 +93,102 @@ class IptEntry(ctypes.Structure):
         ("next_offset", ctypes.c_uint16),
         ("comefrom", ctypes.c_uint),
         ("counters", XtCounters),
-        # followed by matches + target
     ]
 
 IPT_ENTRY_SIZE = ctypes.sizeof(IptEntry)
 
 # --------------------------------------------------------------------
-# Small helpers
+# Utility helpers
 # --------------------------------------------------------------------
 
 def ntoa(addr):
     return socket.inet_ntoa(struct.pack("!I", addr))
 
 def proto_name(p):
-    if p == 0:
-        return "any"
-    if p == 1:
-        return "icmp"
-    if p == 6:
-        return "tcp"
-    if p == 17:
-        return "udp"
+    if p == 0:  return "any"
+    if p == 1:  return "icmp"
+    if p == 6:  return "tcp"
+    if p == 17: return "udp"
     return str(p)
 
 def clean_c_string(arr):
-    raw = bytes(arr)
-    return raw.split(b"\x00", 1)[0].decode(errors="ignore")
+    b = bytes(arr)
+    return b.split(b"\x00", 1)[0].decode(errors="ignore")
 
 # --------------------------------------------------------------------
-# Kernel calls – EXACTLY modeled on your PoC
+# GET_INFO – using EXACT semantics from your PoC
 # --------------------------------------------------------------------
 
 def get_table_info(sock, table):
     libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
     info = IPTGetinfo()
-    info.name = table.encode()  # <-- exactly like your PoC
-    buf_len = ctypes.c_uint(ctypes.sizeof(info))
+    info.name = table.encode()     # CRITICAL: PoC-style assignment
+    buflen = ctypes.c_uint(ctypes.sizeof(info))
 
     rc = libc.getsockopt(
         sock.fileno(),
         SOL_IP,
         IPT_SO_GET_INFO,
         ctypes.byref(info),
-        ctypes.byref(buf_len),
+        ctypes.byref(buflen)
     )
     if rc != 0:
         err = ctypes.get_errno()
-        raise OSError(err, f"IPT_SO_GET_INFO failed: {os.strerror(err)}")
+        raise OSError(err, "IPT_SO_GET_INFO failed: " + os.strerror(err))
 
     return info
 
+# --------------------------------------------------------------------
+# GET_ENTRIES – corrected header + buffer handling (gVisor strict)
+# --------------------------------------------------------------------
 
 def get_table_entries(sock, table, size):
     libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
     hdr = IPTGetEntries()
-    hdr.name = table.encode()
-    hdr.size = size
+    hdr.name = table.encode()       # CRITICAL: must match PoC behavior
+    hdr.size = size                 # size of entries[] only
 
     total = ctypes.sizeof(IPTGetEntries) + size
     buf = ctypes.create_string_buffer(total)
+
+    # Copy header
     ctypes.memmove(buf, ctypes.byref(hdr), ctypes.sizeof(hdr))
 
-    buf_len = ctypes.c_uint(total)
+    buflen = ctypes.c_uint(total)
 
     rc = libc.getsockopt(
         sock.fileno(),
         SOL_IP,
         IPT_SO_GET_ENTRIES,
         buf,
-        ctypes.byref(buf_len),
+        ctypes.byref(buflen)
     )
     if rc != 0:
         err = ctypes.get_errno()
-        raise OSError(err, f"IPT_SO_GET_ENTRIES failed: {os.strerror(err)}")
+        raise OSError(err, "IPT_SO_GET_ENTRIES failed: " + os.strerror(err))
 
-    return buf.raw[:buf_len.value]
+    return buf.raw[:buflen.value]
 
 # --------------------------------------------------------------------
-# Decoding: matches and target
+# Decoding: matches + target
 # --------------------------------------------------------------------
 
 def decode_matches(blob, start, end, indent):
     pos = start
-    while pos + 32 <= end:
+    while pos + XT_EXTENSION_MAXNAMELEN + 3 <= end:
         try:
             match_size = struct.unpack_from("H", blob, pos)[0]
         except struct.error:
             return
+
         if match_size == 0 or pos + match_size > end:
             return
-        # struct xt_entry_match.user:
-        #   __u16 match_size;
-        #   char name[29];
-        #   __u8 revision;
+
         _, name_bytes, rev = struct.unpack_from("H29sB", blob, pos)
         mname = name_bytes.split(b"\x00", 1)[0].decode(errors="ignore")
+
         print(indent + f"match {mname} (size={match_size}, rev={rev})")
         pos += match_size
 
@@ -206,31 +204,31 @@ def decode_target(blob, off, indent):
 
     _, name_bytes, rev = struct.unpack_from("H29sB", blob, off)
     tname = name_bytes.split(b"\x00", 1)[0].decode(errors="ignore")
+
     print(indent + f"target {tname} (size={target_size}, rev={rev})")
 
-    # standard target: first 4 bytes of data is an int verdict
-    if tname == "standard" and target_size >= 36:
+    if tname == "standard" and target_size >= 32 + 4:
         verdict, = struct.unpack_from("i", blob, off + 32)
-        print(indent + f"  verdict raw = {verdict}")
+        print(indent + f"  verdict raw={verdict}")
 
 # --------------------------------------------------------------------
-# Rule + chain decoding
+# Full entry decoding
 # --------------------------------------------------------------------
 
-def build_offset_to_chain(info, table):
+def build_chain_map(info, table):
     hooks = HOOK_NAMES_BY_TABLE.get(table, {})
     mp = {}
-    for hook_idx in range(NF_IP_NUMHOOKS):
-        off = info.hook_entry[hook_idx]
-        if off == 0 and hook_idx not in hooks:
+    for hookidx in range(NF_IP_NUMHOOKS):
+        off = info.hook_entry[hookidx]
+        if off == 0 and hookidx not in hooks:
             continue
-        name = hooks.get(hook_idx, f"HOOK{hook_idx}")
+        name = hooks.get(hookidx, f"HOOK{hookidx}")
         mp[off] = name
     return mp
 
 def decode_entry(blob, off, idx):
     if off + IPT_ENTRY_SIZE > len(blob):
-        print("  [!] truncated entry")
+        print("  [!] Truncated entry")
         return None
 
     entry = IptEntry.from_buffer_copy(blob, off)
@@ -238,21 +236,20 @@ def decode_entry(blob, off, idx):
 
     src = ntoa(ip.src)
     dst = ntoa(ip.dst)
-    sm = ntoa(ip.smsg) if hasattr(ip, "smsg") else ntoa(ip.smsk)  # guard in case of typo
-    dm = ntoa(ip.dmsg) if hasattr(ip, "dmsg") else ntoa(ip.dmsk)
-
+    sm = ntoa(ip.smsk)
+    dm = ntoa(ip.dmsk)
     inif = clean_c_string(ip.iniface)
     outif = clean_c_string(ip.outiface)
-
     proto = proto_name(ip.proto)
 
     print(f"Rule #{idx}: offset={off}, next={entry.next_offset}, target_off={entry.target_offset}")
     print(f"    src={src}/{sm}  dst={dst}/{dm}")
     print(f"    in={inif or '*'}  out={outif or '*'}  proto={proto}")
-    print(f"    counters: pkts={entry.counters.pcnt} bytes={entry.counters.bcnt}")
+    print(f"    pkts={entry.counters.pcnt} bytes={entry.counters.bcnt}")
 
     matches_start = off + IPT_ENTRY_SIZE
     target_start  = off + entry.target_offset
+    entry_end = off + entry.next_offset
 
     if matches_start < target_start:
         print("    matches:")
@@ -266,17 +263,17 @@ def decode_entry(blob, off, idx):
     return entry.next_offset
 
 def walk_entries(blob, info, table):
-    header_size = ctypes.sizeof(IPTGetEntries)
+    hdr_size = ctypes.sizeof(IPTGetEntries)
     end = len(blob)
-    off = header_size
+    off = hdr_size
 
-    offset_to_chain = build_offset_to_chain(info, table)
+    chain_map = build_chain_map(info, table)
 
     idx = 0
     while off + 4 <= end:
-        rel_off = off - header_size
-        if rel_off in offset_to_chain:
-            cname = offset_to_chain[rel_off]
+        rel_off = off - hdr_size
+        if rel_off in chain_map:
+            cname = chain_map[rel_off]
             print("")
             print(f"=== Chain {cname} (offset {rel_off}) ===")
 
@@ -295,31 +292,32 @@ def walk_entries(blob, info, table):
 # --------------------------------------------------------------------
 
 def main():
-    table = "nat"   # or "filter", "mangle", "raw", "security"
+    table = "nat"   # or "filter", "mangle", etc.
 
-    # Use the same kind of socket as your PoC
     with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as s:
-        print(f"[+] Querying table '{table}'")
 
+        print(f"[+] Getting info for table '{table}'")
         try:
             info = get_table_info(s, table)
         except OSError as e:
-            print("[-] IPT_SO_GET_INFO error:", e)
+            print("[!] GET_INFO failed:", e)
             return
 
         raw_name = bytes(info.name)
-        tname = raw_name.split(b"\x00", 1)[0].decode(errors="ignore")
+        tname = raw_name.split(b"\x00")[0].decode(errors="ignore")
 
-        print("Table name:", tname)
-        print("Entries:", info.num_entries)
+        print("Table:", tname)
+        print("Num entries:", info.num_entries)
         print("Size:", info.size)
         print("Hook entry offsets:", list(info.hook_entry))
         print("Underflow offsets:", list(info.underflow))
 
+        print("[+] Getting entries...")
+
         try:
             blob = get_table_entries(s, table, info.size)
         except OSError as e:
-            print("[-] IPT_SO_GET_ENTRIES error:", e)
+            print("[!] GET_ENTRIES failed:", e)
             return
 
     print("\n[+] Decoding entries:\n")
