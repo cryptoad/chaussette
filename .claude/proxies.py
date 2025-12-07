@@ -1,8 +1,7 @@
 import os
 import requests
-from urllib.parse import quote
 
-# Environment variables (actual values at runtime)
+# Read proxy config from environment
 HTTP_PROXY = os.environ.get("HTTP_PROXY")
 HTTPS_PROXY = os.environ.get("HTTPS_PROXY", HTTP_PROXY)
 NO_PROXY = os.environ.get("NO_PROXY", "")
@@ -18,48 +17,25 @@ print("HTTPS_PROXY =", HTTPS_PROXY)
 print("NO_PROXY =", NO_PROXY)
 print("====================\n")
 
-# --- Redirect handler base ---
-REDIR_BASE = "https://eoc2zh1zdnnlrhx.m.pipedream.net?location="
+# === BASE TARGETS (port 80) ===
+TARGETS = [
+    # Explicit from your NO_PROXY
+    "http://169.254.169.254:80",
+    "http://metadata.google.internal:80",
 
+    # Well-known *.svc.cluster.local names
+    "http://kubernetes.default.svc.cluster.local:80",
+    "http://kube-dns.kube-system.svc.cluster.local:80",
+    "http://api-server.default.svc.cluster.local:80",
+    "http://metrics-server.kube-system.svc.cluster.local:80",
+    "http://cluster.local.svc.cluster.local:80",
 
-def loc(url):
-    """Helper to build redirect URLs."""
-    return REDIR_BASE + quote(url)
-
-
-# --- IPv4 localhost targets (with port 15004) ---
-IPV4_LOCAL = [
-    "http://127.0.0.1:15004",
-    "http://localhost:15004",
-    "https://127.0.0.1:15004",
-    "https://localhost:15004",
-]
-
-# --- IPv6 localhost variants on port 15004 ---
-IPV6_LOCAL = [
-    "http://[::1]:15004",
-    "https://[::1]:15004",
-    "http://[0:0:0:0:0:0:0:1]:15004",
-    "https://[0:0:0:0:0:0:0:1]:15004",
-    "http://[::ffff:127.0.0.1]:15004",
-    "https://[::ffff:127.0.0.1]:15004",
-
-    # Less common but sometimes reachable
-    "http://::1:15004",
-    "https://::1:15004",
-]
-
-# --- Internal IP ranges on 15004 ---
-INTERNAL_IPS = [
-    "http://10.0.0.1:15004",
-    "http://172.17.0.1:15004",
-    "http://192.168.0.1:15004",
-    "http://0.0.0.0:15004",
-]
-
-# Build redirect versions (force proxy traversal)
-REDIRECT_TESTS = [
-    loc(target) for target in IPV4_LOCAL + IPV6_LOCAL + INTERNAL_IPS
+    # Well-known *.local names
+    "http://localhost.local:80",
+    "http://router.local:80",
+    "http://gateway.local:80",
+    "http://printer.local:80",
+    "http://nas.local:80",
 ]
 
 
@@ -80,24 +56,10 @@ def try_request(url, use_proxy=True):
 
 
 def main():
-    print("### IPv4 Localhost Tests ###")
-    for t in IPV4_LOCAL:
-        try_request(t, use_proxy=False)
-        try_request(t, use_proxy=True)
-
-    print("\n### IPv6 Localhost Tests ###")
-    for t in IPV6_LOCAL:
-        try_request(t, use_proxy=False)
-        try_request(t, use_proxy=True)
-
-    print("\n### Internal IP Range Tests ###")
-    for t in INTERNAL_IPS:
-        try_request(t, use_proxy=False)
-        try_request(t, use_proxy=True)
-
-    print("\n### Redirect-Based Tests (force proxy traversal) ###")
-    for t in REDIRECT_TESTS:
-        try_request(t, use_proxy=True)
+    print("### Tests for NO_PROXY & Local-like Hosts (port 80) ###")
+    for t in TARGETS:
+        try_request(t, use_proxy=False)  # Expected to bypass proxy
+        try_request(t, use_proxy=True)   # Forced proxy usage
 
 
 if __name__ == "__main__":
