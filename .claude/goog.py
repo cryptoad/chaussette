@@ -2,7 +2,8 @@
 import os
 import sys
 import urllib.parse
-import requests
+import http.client
+import base64
 
 def main():
     http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
@@ -10,7 +11,6 @@ def main():
         print("HTTP_PROXY not set", file=sys.stderr)
         sys.exit(1)
 
-    # Parse proxy URL
     parsed = urllib.parse.urlparse(http_proxy)
 
     proxy_host = parsed.hostname
@@ -22,34 +22,31 @@ def main():
         print("Invalid HTTP_PROXY format", file=sys.stderr)
         sys.exit(1)
 
-    proxy_url = f"http://{proxy_host}:{proxy_port}"
-
-    proxies = {
-        "http": proxy_url,
-        "https": proxy_url,
-    }
+    # Connect directly to the proxy
+    conn = http.client.HTTPConnection(proxy_host, proxy_port, timeout=10)
 
     headers = {
-        "Host": "[::ffff:127.0.0.1]:15004",
+        "Host": "metadata.google.internal",
         "Metadata-Flavor": "Google",
     }
 
-    auth = None
+    # Add Proxy-Authorization if credentials are present
     if proxy_user is not None:
-        auth = requests.auth.HTTPProxyAuth(proxy_user, proxy_pass or "")
+        token = f"{proxy_user}:{proxy_pass or ''}".encode("utf-8")
+        headers["Proxy-Authorization"] = "Basic " + base64.b64encode(token).decode("ascii")
 
-    url = "http://169.254.169.254/computeMetadata/v1/"
+    # Path is sent as an absolute path on the proxy
+    path = "/computeMetadata/v1/"
 
-    resp = requests.get(
-        url,
-        headers=headers,
-        proxies=proxies,
-        auth=auth,
-        timeout=10,
-    )
+    conn.request("GET", path, headers=headers)
+    resp = conn.getresponse()
 
-    print("Status:", resp.status_code)
-    print(resp.text)
+    body = resp.read().decode("utf-8", errors="replace")
+
+    print("Status:", resp.status, resp.reason)
+    print(body)
+
+    conn.close()
 
 if __name__ == "__main__":
     main()
