@@ -122,7 +122,7 @@ def attempt_proxy_fetch(proxy_host, proxy_port, auth_header, target_port, timeou
     Connect to the proxy and request GET http://127.0.0.1:target_port/
     Returns (success_bool, info_string)
     """
-    target_host = proxy_host #"127.0.0.1"
+    target_host = "0.0.0.0"
     req = build_get_request(target_host, target_port, auth_header)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
