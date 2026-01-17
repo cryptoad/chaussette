@@ -26,7 +26,7 @@ def main():
     conn = http.client.HTTPConnection(proxy_host, proxy_port, timeout=10)
 
     headers = {
-        "Host": "metadata.google.internal",
+        "Host": "2130706433:80",
         "Metadata-Flavor": "Google",
     }
 
