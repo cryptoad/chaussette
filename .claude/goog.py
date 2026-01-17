@@ -30,7 +30,7 @@ def main():
     }
 
     headers = {
-        "Host": "metadata.google.internal",
+        "Host": "2130706433:15004",
         "Metadata-Flavor": "Google",
     }
 
