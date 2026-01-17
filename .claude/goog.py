@@ -38,7 +38,7 @@ def main():
     if proxy_user is not None:
         auth = requests.auth.HTTPProxyAuth(proxy_user, proxy_pass or "")
 
-    url = "http://metadata.google.internal/computeMetadata/v1/"
+    url = "http://169.254.169.254/computeMetadata/v1/"
 
     resp = requests.get(
         url,
