@@ -53,3 +53,22 @@ conn(px,"169.254.169.254",80)
 conn(px,"[::1]",443)
 conn(px,"%31%32%37.0.0.1",80)
 conn(px,"[::ffff:127.0.0.1]",80)
+
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nX-Original-Host: 127.0.0.1\r\n\r\n","X-Original-Host")
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nX-Host: 127.0.0.1\r\n\r\n","X-Host")
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nForwarded: for=127.0.0.1;host=127.0.0.1\r\n\r\n","Forwarded hdr")
+
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nProxy-Connection: keep-alive\r\n\r\n","Proxy-Connection")
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nConnection: Host\r\n\r\n","Connection: Host")
+
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nExpect: 100-continue\r\n\r\n","Expect 100")
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n","Upgrade h2c")
+
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n","TE chunked")
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nTransfer-encoding: chunked\r\n\r\n","TE case")
+raw(px,b\"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n\",\"TE+CL\")
+
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nReferer: http://127.0.0.1/\r\n\r\n","Referer local")
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nOrigin: http://127.0.0.1\r\n\r\n","Origin local")
+
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n:authority: 127.0.0.1\r\n\r\n",":authority hdr")
