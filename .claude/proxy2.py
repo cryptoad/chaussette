@@ -72,3 +72,10 @@ raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nReferer: http:
 raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nOrigin: http://127.0.0.1\r\n\r\n","Origin local")
 
 raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n:authority: 127.0.0.1\r\n\r\n",":authority hdr")
+
+raw(px,b"GET http://example.com@127.0.0.1/ HTTP/1.1\r\nHost: example.com\r\n\r\n","user@host")
+raw(px,b"GET http://example.com#@127.0.0.1/ HTTP/1.1\r\nHost: example.com\r\n\r\n","fragment @")
+raw(px,b"GET http://example.com?@127.0.0.1/ HTTP/1.1\r\nHost: example.com\r\n\r\n","query @")
+raw(px,b"GET http://%2531%2532%2537.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n","double-encoded IP")
+raw(px,b"GET /http://127.0.0.1/ HTTP/1.1\r\nHost: example.com\r\n\r\n","URL-in-path")
+raw(px,b"GET http://example.com\\@127.0.0.1/ HTTP/1.1\r\nHost: example.com\r\n\r\n","backslash sep")
