@@ -66,7 +66,7 @@ raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nUpgrade: h2c\r
 
 raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n","TE chunked")
 raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nTransfer-encoding: chunked\r\n\r\n","TE case")
-raw(px,b\"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n\",\"TE+CL\")
+raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n","TE+CL")
 
 raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nReferer: http://127.0.0.1/\r\n\r\n","Referer local")
 raw(px,b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nOrigin: http://127.0.0.1\r\n\r\n","Origin local")
