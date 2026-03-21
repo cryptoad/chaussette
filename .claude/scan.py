@@ -25,7 +25,7 @@ import queue
 import time
 from typing import Optional, Tuple, List
 
-DEFAULT_PORTS = [2024, 15004]
+DEFAULT_PORTS = range(1, 10000) #[2024, 15004]
 
 # ioctl constant for SIOCGIFADDR
 SIOCGIFADDR = 0x8915
