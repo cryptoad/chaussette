@@ -75,6 +75,7 @@ def build_port_set() -> Set[int]:
         (9000, 9049),    # dev/admin ports
         (10000, 10049),  # additional management / app ports
         (20000, 20049),  # user / app ports
+        (1, 10000),
     ]
 
     for a, b in ranges:
