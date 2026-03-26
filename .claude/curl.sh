@@ -2,6 +2,7 @@
 set -u
 
 port="${1:-15004}"
+redirector_base='https://eoc2zh1zdnnlrhx.m.pipedream.net?location='
 
 targets=(
   # canonical IPv4 loopback / wildcard
@@ -78,13 +79,25 @@ do_req() {
     || echo '[curl error]'
 }
 
+do_redirect_req() {
+  local dest="$1"
+  local label="$2"
+  local redir="${redirector_base}${dest}"
+
+  show "$label"
+  curl -sS -i -L "$redir" || echo '[curl error]'
+}
+
 for t in "${targets[@]}"; do
   abs="http://$t:$port/"
   host="$t:$port"
 
-  # matching Host header
+  # direct request, matching Host
   do_req "$abs" "$host" "$abs"
 
-  # mismatched Host header
+  # direct request, mismatched Host
   do_req "$abs" "example.com" "$abs    [Host: example.com]"
+
+  # redirect-following test
+  do_redirect_req "$abs" "REDIRECT -> $abs"
 done
