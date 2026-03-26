@@ -8,7 +8,8 @@ targets=(
 unset NO_PROXY
 unset no_proxy
 for t in "${targets[@]}"; do
-  curl -sS -i -w 3 http://example.invalid/ \
+  printf '\n===== http://%s:15004/ =====\n\n' "$t"
+  curl -sS -i http://example.invalid/ \
     --request-target "http://$t:15004/" \
-    -H "Host: $t:15004" 2>&1
+    -H "Host: $t:15004" || echo "[curl error]"
 done
