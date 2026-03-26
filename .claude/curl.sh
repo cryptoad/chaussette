@@ -5,7 +5,8 @@ targets=(
 '[::1]' '[0:0:0:0:0:0:0:1]' '[::]'
 '[::ffff:127.0.0.1]' '[::ffff:7f00:1]'
 )
-
+unset NO_PROXY
+unset no_proxy
 for t in "${targets[@]}"; do
   curl -sS -i http://example.invalid/ \
     --request-target "http://$t:15004/" \
