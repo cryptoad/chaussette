@@ -57,16 +57,20 @@ def main():
     iface, gw = get_default_gateway_linux()
     print(f"Gateway: {gw} via {iface}")
 
+    # Connect-to targets: where the TCP socket is opened.
     targets = [
         ("example.com", "93.184.216.34"),
-        ("zero", "0.0.0.0"),  # added test case
+        ("zero", "0.0.0.0"),
     ]
 
+    # Host header cases for normal GET tests.
     host_headers = [
         "example.com",
         "localhost",
         "127.0.0.1",
-        "0.0.0.0",  # added test case
+        "0.0.0.0",
+        "::1",
+        "[::1]",
         "",
     ]
 
@@ -74,6 +78,30 @@ def main():
         ("plain", ""),
         ("xff-private", "X-Forwarded-For: 127.0.0.1\r\n"),
         ("proxy-auth", f"Proxy-Authorization: {basic_auth('test','test')}\r\n"),
+    ]
+
+    # CONNECT destinations: keep small and high-signal so runtime stays low.
+    connect_dests = [
+        ("example.com", 443),
+        ("93.184.216.34", 443),
+
+        ("example.com", 80),
+        ("93.184.216.34", 80),
+
+        ("iana.org", 443),
+        ("1.1.1.1", 443),
+        ("8.8.8.8", 443),
+
+        # Documentation/reserved cases useful for policy mapping
+        ("127.0.0.1", 443),
+        ("0.0.0.0", 443),
+        ("localhost", 443),
+        ("[::1]", 443),
+
+        # RFC5737 documentation nets
+        ("192.0.2.1", 443),
+        ("198.51.100.1", 443),
+        ("203.0.113.1", 443),
     ]
 
     jobs = []
@@ -84,10 +112,17 @@ def main():
             req = (
                 "GET / HTTP/1.1\r\n"
                 f"Host: {host}\r\n"
-                "User-Agent: fast-probe/3.0\r\n"
+                "User-Agent: fast-probe/5.0\r\n"
                 "Connection: close\r\n\r\n"
             )
-            jobs.append((target_ip, 80, f"GET / host={host or '<empty>'} connect={target_ip}", req, False, None))
+            jobs.append((
+                target_ip,
+                80,
+                f"GET / host={host or '<empty>'} connect={target_ip}",
+                req,
+                False,
+                None,
+            ))
 
         # Absolute-form GET on 80
         for name, extra in header_variants:
@@ -95,41 +130,72 @@ def main():
                 "GET http://example.com/ HTTP/1.1\r\n"
                 "Host: example.com\r\n"
                 f"{extra}"
-                "User-Agent: fast-probe/3.0\r\n"
+                "User-Agent: fast-probe/5.0\r\n"
                 "Connection: close\r\n\r\n"
             )
-            jobs.append((target_ip, 80, f"ABSOLUTE GET variant={name} connect={target_ip}", req, False, None))
+            jobs.append((
+                target_ip,
+                80,
+                f"ABSOLUTE GET variant={name} connect={target_ip}",
+                req,
+                False,
+                None,
+            ))
 
         # CONNECT on 80
-        for dest in ("example.com:443", "93.184.216.34:443"):
+        for dest_host, dest_port in connect_dests:
+            dest = f"{dest_host}:{dest_port}"
             req = (
                 f"CONNECT {dest} HTTP/1.1\r\n"
                 f"Host: {dest}\r\n"
-                "User-Agent: fast-probe/3.0\r\n"
+                "User-Agent: fast-probe/5.0\r\n"
                 "Proxy-Connection: close\r\n"
                 "Connection: close\r\n\r\n"
             )
-            jobs.append((target_ip, 80, f"CONNECT {dest} connect={target_ip}", req, False, None))
+            jobs.append((
+                target_ip,
+                80,
+                f"CONNECT {dest} connect={target_ip}",
+                req,
+                False,
+                None,
+            ))
 
-        # HTTPS on 443
+        # HTTPS GET on 443
         for sni in (None, "example.com", "localhost"):
             req = (
                 "GET / HTTP/1.1\r\n"
                 "Host: example.com\r\n"
-                "User-Agent: fast-probe/3.0\r\n"
+                "User-Agent: fast-probe/5.0\r\n"
                 "Connection: close\r\n\r\n"
             )
-            jobs.append((target_ip, 443, f"TLS GET sni={sni or '<none>'} connect={target_ip}", req, True, sni))
+            jobs.append((
+                target_ip,
+                443,
+                f"TLS GET sni={sni or '<none>'} connect={target_ip}",
+                req,
+                True,
+                sni,
+            ))
 
-        for dest in ("example.com:443", "93.184.216.34:443"):
+        # CONNECT over TLS on 443
+        for dest_host, dest_port in connect_dests:
+            dest = f"{dest_host}:{dest_port}"
             req = (
                 f"CONNECT {dest} HTTP/1.1\r\n"
                 f"Host: {dest}\r\n"
-                "User-Agent: fast-probe/3.0\r\n"
+                "User-Agent: fast-probe/5.0\r\n"
                 "Proxy-Connection: close\r\n"
                 "Connection: close\r\n\r\n"
             )
-            jobs.append((target_ip, 443, f"TLS CONNECT {dest} connect={target_ip}", req, True, "example.com"))
+            jobs.append((
+                target_ip,
+                443,
+                f"TLS CONNECT {dest} connect={target_ip}",
+                req,
+                True,
+                "example.com",
+            ))
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         futs = [ex.submit(run_one, *job) for job in jobs]
