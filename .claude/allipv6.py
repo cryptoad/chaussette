@@ -4,11 +4,13 @@ import struct
 import os
 import time
 
-ICMPV6_NS = 135
-ICMPV6_NA = 136
+ICMPV6_ECHO_REQUEST = 128
+ICMPV6_ECHO_REPLY   = 129
 
 TIMEOUT = 2.0
 
+# ============================================================
+# Helpers
 # ============================================================
 
 def get_iface():
@@ -25,68 +27,82 @@ def get_self_ipv6(iface):
             addr_hex, idx, plen, scope, flags, ifname = line.split()
             if ifname != iface:
                 continue
-            addr = socket.inet_ntop(socket.AF_INET6, bytes.fromhex(addr_hex))
-            if addr.startswith("fe80::"):
-                addrs.append(addr)
+
+            addr = socket.inet_ntop(
+                socket.AF_INET6,
+                bytes.fromhex(addr_hex)
+            )
+            addrs.append(addr)
+
     return addrs
+
+def join_multicast(sock, iface, group):
+    idx = socket.if_nametoindex(iface)
+    mreq = socket.inet_pton(socket.AF_INET6, group) + struct.pack("@I", idx)
+    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
 
 def make_socket(iface):
     s = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
     s.settimeout(TIMEOUT)
+
+    # bind to interface
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
+
+    # enable packet info
+    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVPKTINFO, 1)
+
+    # hop limits
+    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
+    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, 255)
+
     return s
 
 # ============================================================
-# ND logic
+# ICMPv6
 # ============================================================
 
-def solicited_node_multicast(addr):
-    b = socket.inet_pton(socket.AF_INET6, addr)
-    last3 = b[-3:]
-    return "ff02::1:ff%02x:%02x%02x" % (last3[0], last3[1], last3[2])
+def send_echo(sock, iface, target):
+    ident = os.getpid() & 0xffff
+    seq = 1
+    pkt = struct.pack("!BBHHH", ICMPV6_ECHO_REQUEST, 0, 0, ident, seq) + b"X"
 
-def send_ns(sock, iface, target):
-    target_bin = socket.inet_pton(socket.AF_INET6, target)
+    sock.sendto(pkt, (target, 0, 0, socket.if_nametoindex(iface)))
+    return ident
 
-    # Type, code, checksum, reserved
-    pkt = struct.pack("!BBHI", ICMPV6_NS, 0, 0, 0) + target_bin
-
-    group = solicited_node_multicast(target)
-
-    sock.sendto(pkt, (group, 0, 0, socket.if_nametoindex(iface)))
-
-def recv_na(sock, self_addrs):
-    found = []
-
+def recv_loop(sock, ident, self_addrs):
     start = time.time()
+
     while time.time() - start < TIMEOUT:
         try:
             data, addr = sock.recvfrom(2048)
         except socket.timeout:
-            break
+            return None
 
-        if data[0] == ICMPV6_NA:
-            src = addr[0]
-            if src not in self_addrs:
-                found.append(src)
+        t = data[0]
+        src = addr[0]
 
-    return list(set(found))
+        # ignore own echo request
+        if t == ICMPV6_ECHO_REQUEST:
+            continue
 
-# ============================================================
-# Simple target generation
-# ============================================================
+        # ignore packets from self
+        if src in self_addrs:
+            continue
 
-def mutate_targets(base):
-    parts = base.split(":")
-    last = int(parts[-1], 16)
+        if t == ICMPV6_ECHO_REPLY:
+            r_ident = struct.unpack("!H", data[4:6])[0]
+            if r_ident == ident:
+                return ("ECHO_REPLY", addr)
 
-    out = []
-    for i in range(-32, 33):
-        v = (last + i) & 0xffff
-        parts[-1] = f"{v:x}"
-        out.append(":".join(parts))
+        if t == 134:
+            return ("ROUTER_ADVERT", addr)
 
-    return list(set(out))
+        if t == 136:
+            return ("NEIGHBOR_ADVERT", addr)
+
+        return (f"type={t}", addr)
+
+    return None
 
 # ============================================================
 # Main
@@ -103,29 +119,38 @@ def main():
     print(f"[+] iface: {iface}")
     print(f"[+] self IPv6: {self_addrs}")
 
-    if not self_addrs:
-        print("[-] no IPv6 addr")
-        return
-
-    base = self_addrs[0]
-
     sock = make_socket(iface)
 
-    print("\n[+] sending neighbor solicitations...")
+    # join multicast groups
+    join_multicast(sock, iface, "ff02::1")  # all nodes
+    join_multicast(sock, iface, "ff02::2")  # all routers
 
-    targets = mutate_targets(base)
+    tests = [
+        ("all-nodes", "ff02::1"),
+        ("all-routers", "ff02::2"),
+    ]
 
-    for t in targets:
-        send_ns(sock, iface, t)
+    for name, target in tests:
+        print(f"\n--- {name} ({target}%{iface}) ---")
 
-    found = recv_na(sock, self_addrs)
+        ident = send_echo(sock, iface, target)
+        res = recv_loop(sock, ident, self_addrs)
 
-    print("\n[+] results:")
-    if found:
-        for x in found:
-            print("[FOUND]", x)
-    else:
-        print("[-] no neighbors discovered")
+        if res:
+            print("[+] response:", res)
+        else:
+            print("[-] no response")
+
+    print("\n[+] passive listen (5s)...")
+    start = time.time()
+
+    while time.time() - start < 5:
+        try:
+            data, addr = sock.recvfrom(2048)
+            if addr[0] not in self_addrs:
+                print("[*] unsolicited:", data[0], addr)
+        except socket.timeout:
+            pass
 
     print("\nDone.")
 
