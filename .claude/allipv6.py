@@ -24,18 +24,14 @@ def get_self_ipv6(iface):
     addrs = []
     with open("/proc/net/if_inet6") as f:
         for line in f:
-            parts = line.strip().split()
-            addr_hex, idx, plen, scope, flags, ifname = parts
+            addr_hex, idx, plen, scope, flags, ifname = line.split()
             if ifname != iface:
                 continue
 
-            # only link-local (scope == 0x20)
-            if scope != "20":
-                continue
-
-            # convert hex -> IPv6
-            addr = ":".join(addr_hex[i:i+4] for i in range(0,32,4))
-            addr = socket.inet_ntop(socket.AF_INET6, bytes.fromhex(addr_hex))
+            addr = socket.inet_ntop(
+                socket.AF_INET6,
+                bytes.fromhex(addr_hex)
+            )
             addrs.append(addr)
 
     return addrs
@@ -49,13 +45,13 @@ def make_socket(iface):
     s = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
     s.settimeout(TIMEOUT)
 
-    # bind to iface
+    # bind to interface
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
 
-    # receive pktinfo
+    # enable packet info
     s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVPKTINFO, 1)
 
-    # hops
+    # hop limits
     s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
     s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, 255)
 
@@ -75,6 +71,7 @@ def send_echo(sock, iface, target):
 
 def recv_loop(sock, ident, self_addrs):
     start = time.time()
+
     while time.time() - start < TIMEOUT:
         try:
             data, addr = sock.recvfrom(2048)
@@ -88,7 +85,7 @@ def recv_loop(sock, ident, self_addrs):
         if t == ICMPV6_ECHO_REQUEST:
             continue
 
-        # ignore self responses
+        # ignore packets from self
         if src in self_addrs:
             continue
 
@@ -125,8 +122,8 @@ def main():
     sock = make_socket(iface)
 
     # join multicast groups
-    join_multicast(sock, iface, "ff02::1")
-    join_multicast(sock, iface, "ff02::2")
+    join_multicast(sock, iface, "ff02::1")  # all nodes
+    join_multicast(sock, iface, "ff02::2")  # all routers
 
     tests = [
         ("all-nodes", "ff02::1"),
@@ -146,6 +143,7 @@ def main():
 
     print("\n[+] passive listen (5s)...")
     start = time.time()
+
     while time.time() - start < 5:
         try:
             data, addr = sock.recvfrom(2048)
