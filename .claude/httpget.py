@@ -41,7 +41,7 @@ for host in TEST_HOSTS:
   s.connect((ip, 80))
   req = (
     "GET / HTTP/1.1\r\n"
-    "Host: [::1]\r\n"
+    f"Host: {host}\r\n"
     "Connection: close\r\n\r\n"
   )
   s.sendall(req.encode())
