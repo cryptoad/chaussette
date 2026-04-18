@@ -1,72 +1,21 @@
-#!/usr/bin/env python3
-import re
-import socket
-import sys
-
-PORT = 15004
-TIMEOUT = 3
-
-def get_ips_from_fib_trie():
-    ips = []
-    with open("/proc/net/fib_trie", "r", encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
-
-    for i, line in enumerate(lines):
-        m = re.match(r"\s*\|\--\s+(\d+\.\d+\.\d+\.\d+)", line)
-        if not m:
-            continue
-        ip = m.group(1)
-
-        # In fib_trie, local addresses are followed shortly by "/32 host LOCAL"
-        window = "".join(lines[i:i+3])
-        if "/32 host LOCAL" in window and not ip.startswith("127."):
-            ips.append(ip)
-
-    # dedupe, preserve order
-    out = []
-    seen = set()
-    for ip in ips:
-        if ip not in seen:
-            seen.add(ip)
-            out.append(ip)
-    return out
-
-def main():
-    ips = get_ips_from_fib_trie()
-    if not ips:
-        print("[!] No non-localhost LOCAL IPv4 found in /proc/net/fib_trie", file=sys.stderr)
-        sys.exit(1)
-
-    ip = ips[0]
-    print(f"[+] Target IP: {ip}:{PORT}")
-
-    req = (
-        f"GET / HTTP/1.1\r\n"
-        f"Host: {ip}:{PORT}\r\n"
-        f"User-Agent: raw-socket-test\r\n"
-        f"Connection: close\r\n"
-        f"\r\n"
-    )
-
-    print("[+] Request:")
-    print(req, end="")
-
-    try:
-        with socket.create_connection((ip, PORT), timeout=TIMEOUT) as s:
-            s.settimeout(TIMEOUT)
-            s.sendall(req.encode())
-
-            print("[+] Response:")
-            while True:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                sys.stdout.buffer.write(chunk)
-            sys.stdout.flush()
-
-    except Exception as e:
-        print(f"\n[!] Error: {type(e).__name__}: {e}", file=sys.stderr)
-        sys.exit(2)
-
-if __name__ == "__main__":
-    main()
+import re, socket, sys
+L=open("/proc/net/fib_trie").read().splitlines()
+ips=[]
+for i,x in enumerate(L):
+    m=re.match(r"\s*\|\--\s+(\d+\.\d+\.\d+\.\d+)", x)
+    if m and "/32 host LOCAL" in "\n".join(L[i:i+3]) and not m.group(1).startswith("127."):
+        ips.append(m.group(1))
+ips=list(dict.fromkeys(ips))
+if not ips: raise SystemExit("no non-localhost IP found")
+ip=ips[0]
+print(f"[+] {ip}:15004")
+req=f"GET / HTTP/1.1\r\nHost: {ip}:15004\r\nConnection: close\r\n\r\n"
+print(req, end="")
+try:
+    s=socket.create_connection((ip,15004),timeout=3); s.sendall(req.encode())
+    while 1:
+        b=s.recv(4096)
+        if not b: break
+        sys.stdout.buffer.write(b)
+except Exception as e:
+    print(f"\n[!] {type(e).__name__}: {e}", file=sys.stdout)
