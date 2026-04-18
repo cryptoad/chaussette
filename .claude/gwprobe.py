@@ -57,15 +57,16 @@ def main():
     iface, gw = get_default_gateway_linux()
     print(f"Gateway: {gw} via {iface}")
 
-    # Keep this focused so it finishes quickly.
     targets = [
         ("example.com", "93.184.216.34"),
+        ("zero", "0.0.0.0"),  # added test case
     ]
 
     host_headers = [
         "example.com",
         "localhost",
         "127.0.0.1",
+        "0.0.0.0",  # added test case
         "",
     ]
 
@@ -110,7 +111,7 @@ def main():
             )
             jobs.append((target_ip, 80, f"CONNECT {dest} connect={target_ip}", req, False, None))
 
-        # HTTPS on 443: just a few high-signal cases
+        # HTTPS on 443
         for sni in (None, "example.com", "localhost"):
             req = (
                 "GET / HTTP/1.1\r\n"
