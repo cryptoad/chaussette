@@ -1,159 +1,159 @@
 #!/usr/bin/env python3
-import socket
-import ssl
-import struct
+import socket, ssl, struct, base64, itertools
 
-TIMEOUT = 2.0
-PORTS = [80, 443]
-
-HOST_HEADERS = [
-    "localhost",
-    "127.0.0.1",
-    "example.com",
-    "google.com",
-    "internal",
-    "",
-]
-
-CONNECT_TARGETS = [
-    "example.com:80",
-    "example.com:443",
-    "google.com:443",
-    "1.1.1.1:443",
-    "127.0.0.1:80",
-]
+TIMEOUT = 2.5
+MAX_READ = 16384
 
 def get_default_gateway_linux():
     with open("/proc/net/route") as f:
-        next(f)  # skip header
+        next(f)
         for line in f:
             fields = line.strip().split()
-            if len(fields) < 3:
-                continue
-            iface, dest, gateway = fields[0], fields[1], fields[2]
-            if dest == "00000000":
-                gw_ip = socket.inet_ntoa(struct.pack("<L", int(gateway, 16)))
-                return iface, gw_ip
+            if len(fields) >= 3 and fields[1] == "00000000":
+                return fields[0], socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
     raise SystemExit("No default gateway found in /proc/net/route")
 
-def recv_all(sock):
+def recv_all(sock, max_bytes=MAX_READ):
     sock.settimeout(TIMEOUT)
     data = b""
     try:
-        while True:
+        while len(data) < max_bytes:
             chunk = sock.recv(4096)
             if not chunk:
                 break
             data += chunk
-            if len(data) > 16384:
-                break
     except socket.timeout:
         pass
     return data
 
-def print_response(label, data):
-    print(f"\n--- {label} ---")
-    if not data:
-        print("(no response)")
-        return
-    text = data.decode(errors="replace")
-    lines = text.splitlines()
-    for line in lines[:40]:
-        print(line)
-
-def connect(ip, port, use_ssl=False, sni=None):
+def open_sock(ip, port, use_tls=False, sni=None):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(TIMEOUT)
     s.connect((ip, port))
-    if use_ssl:
+    if use_tls:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         s = ctx.wrap_socket(s, server_hostname=(sni or ip))
     return s
 
-def probe_get(ip, port, use_ssl):
-    for host in HOST_HEADERS:
-        try:
-            s = connect(ip, port, use_ssl=use_ssl, sni=(host if host else None))
+def show_cert(ip):
+    try:
+        s = open_sock(ip, 443, use_tls=True, sni="example.com")
+        cert = s.getpeercert()
+        print("\n=== TLS certificate on 443 ===")
+        print(cert if cert else "(no parsed cert details)")
+        s.close()
+    except Exception as e:
+        print(f"\n=== TLS certificate fetch failed: {e}")
+
+def do_req(ip, port, label, raw, use_tls=False, sni=None):
+    print(f"\n--- {label} ---")
+    try:
+        s = open_sock(ip, port, use_tls=use_tls, sni=sni)
+        s.sendall(raw.encode("utf-8", "replace"))
+        data = recv_all(s)
+        s.close()
+        if not data:
+            print("(no response)")
+            return
+        print(data.decode("utf-8", "replace"))
+    except Exception as e:
+        print(f"ERROR: {e}")
+
+def basic_auth(user, pw):
+    tok = base64.b64encode(f"{user}:{pw}".encode()).decode()
+    return f"Basic {tok}"
+
+def main():
+    iface, gw = get_default_gateway_linux()
+    print(f"Gateway: {gw} via {iface}")
+
+    targets = [
+        ("example.com", "93.184.216.34"),
+        ("google.com", "142.250.190.14"),
+        ("1.1.1.1", "1.1.1.1"),
+    ]
+
+    host_headers = ["example.com", "google.com", "localhost", "127.0.0.1", gw, ""]
+    snis = [None, "example.com", "google.com", "localhost"]
+
+    show_cert(gw)
+
+    for port in (80, 443):
+        tls = (port == 443)
+        print(f"\n================ PORT {port} {'TLS' if tls else 'PLAINTEXT'} ================")
+
+        # origin-form requests
+        for host in host_headers:
             req = (
                 f"GET / HTTP/1.1\r\n"
                 f"Host: {host}\r\n"
-                f"User-Agent: gw-probe/1.0\r\n"
-                f"Accept: */*\r\n"
+                f"User-Agent: gw-probe/2.0\r\n"
                 f"Connection: close\r\n\r\n"
             )
-            s.sendall(req.encode())
-            data = recv_all(s)
-            print_response(
-                f"GET / (Host: {host or '<empty>'}) on {port}{' TLS' if use_ssl else ''}",
-                data,
-            )
-            s.close()
-        except Exception as e:
-            print(f"\n--- GET failed (Host: {host or '<empty>'}) on {port}: {e}")
+            do_req(gw, port, f"GET / Host={host or '<empty>'}", req, use_tls=tls, sni=("example.com" if tls else None))
 
-def probe_connect(ip, port, use_ssl):
-    for target in CONNECT_TARGETS:
-        try:
-            s = connect(ip, port, use_ssl=use_ssl)
+        # alternate methods
+        for method in ("HEAD", "OPTIONS"):
             req = (
-                f"CONNECT {target} HTTP/1.1\r\n"
-                f"Host: {target}\r\n"
-                f"User-Agent: gw-probe/1.0\r\n"
-                f"Proxy-Connection: close\r\n\r\n"
-            )
-            s.sendall(req.encode())
-            data = recv_all(s)
-            print_response(
-                f"CONNECT {target} on {port}{' TLS' if use_ssl else ''}",
-                data,
-            )
-            s.close()
-        except Exception as e:
-            print(f"\n--- CONNECT failed ({target}) on {port}: {e}")
-
-def probe_absolute_get(ip, port, use_ssl):
-    urls = [
-        "http://example.com/",
-        "http://1.1.1.1/",
-        "http://127.0.0.1/",
-    ]
-    for url in urls:
-        try:
-            s = connect(ip, port, use_ssl=use_ssl)
-            req = (
-                f"GET {url} HTTP/1.1\r\n"
+                f"{method} / HTTP/1.1\r\n"
                 f"Host: example.com\r\n"
-                f"User-Agent: gw-probe/1.0\r\n"
+                f"User-Agent: gw-probe/2.0\r\n"
                 f"Connection: close\r\n\r\n"
             )
-            s.sendall(req.encode())
-            data = recv_all(s)
-            print_response(
-                f"Absolute-form GET {url} on {port}{' TLS' if use_ssl else ''}",
-                data,
+            do_req(gw, port, f"{method} /", req, use_tls=tls, sni=("example.com" if tls else None))
+
+        # absolute-form GETs
+        for host, ip in targets:
+            for url in (f"http://{host}/", f"http://{ip}/"):
+                req = (
+                    f"GET {url} HTTP/1.1\r\n"
+                    f"Host: {host}\r\n"
+                    f"User-Agent: gw-probe/2.0\r\n"
+                    f"Connection: close\r\n\r\n"
+                )
+                do_req(gw, port, f"ABSOLUTE GET {url}", req, use_tls=tls, sni=(host if tls else None))
+
+        # CONNECT tests
+        for host, ip in targets:
+            for dest in (f"{host}:443", f"{ip}:443", f"{host}:80", f"{ip}:80"):
+                req = (
+                    f"CONNECT {dest} HTTP/1.1\r\n"
+                    f"Host: {dest}\r\n"
+                    f"User-Agent: gw-probe/2.0\r\n"
+                    f"Proxy-Connection: close\r\n\r\n"
+                )
+                do_req(gw, port, f"CONNECT {dest}", req, use_tls=tls, sni=("example.com" if tls else None))
+
+        # header variation tests
+        header_variants = [
+            ("xff-public", "X-Forwarded-For: 8.8.8.8\r\n"),
+            ("xff-private", "X-Forwarded-For: 127.0.0.1\r\n"),
+            ("forwarded", "Forwarded: for=8.8.8.8;proto=http;host=example.com\r\n"),
+            ("proxy-auth", f"Proxy-Authorization: {basic_auth('test','test')}\r\n"),
+            ("all", "X-Forwarded-For: 8.8.8.8\r\nForwarded: for=8.8.8.8;proto=http;host=example.com\r\n"),
+        ]
+        for name, extra in header_variants:
+            req = (
+                f"GET http://example.com/ HTTP/1.1\r\n"
+                f"Host: example.com\r\n"
+                f"{extra}"
+                f"User-Agent: gw-probe/2.0\r\n"
+                f"Connection: close\r\n\r\n"
             )
-            s.close()
-        except Exception as e:
-            print(f"\n--- Absolute GET failed ({url}) on {port}: {e}")
+            do_req(gw, port, f"ABSOLUTE GET variant={name}", req, use_tls=tls, sni=("example.com" if tls else None))
 
-def main():
-    iface, ip = get_default_gateway_linux()
-    print(f"Default gateway on {iface}: {ip}")
-
-    for port in PORTS:
-        print(f"\n========== PORT {port} ==========")
-        use_ssl = (port == 443)
-
-        print("\n### GET tests ###")
-        probe_get(ip, port, use_ssl)
-
-        print("\n### CONNECT tests ###")
-        probe_connect(ip, port, use_ssl)
-
-        print("\n### Absolute-form GET tests ###")
-        probe_absolute_get(ip, port, use_ssl)
+        # SNI variation on 443
+        if tls:
+            req = (
+                "GET / HTTP/1.1\r\n"
+                "Host: example.com\r\n"
+                "User-Agent: gw-probe/2.0\r\n"
+                "Connection: close\r\n\r\n"
+            )
+            for sni in snis:
+                do_req(gw, port, f"SNI={sni or '<none>'} Host=example.com", req, use_tls=True, sni=sni)
 
 if __name__ == "__main__":
     main()
