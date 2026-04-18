@@ -10,12 +10,15 @@ for i, x in enumerate(L):
 
 # dedupe
 ips = list(dict.fromkeys(ips))
+
+print(f"[+] discovered_ips={ips}")
+
 if not ips:
     print("[!] no non-localhost IP found")
     sys.exit(1)
 
 ip = ips[0]
-print(f"[+] target={ip}:15004")
+print(f"[+] using_ip={ip}:15004")
 
 req = f"GET / HTTP/1.1\r\nHost: {ip}:15004\r\nUser-Agent: debug\r\nConnection: close\r\n\r\n"
 print("[+] request:")
@@ -33,7 +36,6 @@ try:
         b = s.recv(4096)
         if not b:
             break
-        # decode safely so everything stays on stdout
         print(b.decode(errors="replace"), end="")
 
     print("\n[+] done")
