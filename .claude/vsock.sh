@@ -1,59 +1,92 @@
-#!/bin/sh
-set -eu
+cat > /tmp/vsock_alone_probe.py <<'PY'
+#!/usr/bin/env python3
+import os
+import socket
+import fcntl
+import errno
+import struct
 
-echo "== uname =="
-uname -a
+IOCTL_VM_SOCKETS_GET_LOCAL_CID = 0x7b9
 
-echo
-echo "== /dev/vsock =="
-ls -l /dev/vsock 2>&1 || true
+def section(name):
+    print(f"\n== {name} ==")
 
-echo
-echo "== virtio devices =="
-for d in /sys/bus/virtio/devices/*; do
-  [ -e "$d/device" ] || continue
-  printf '%s: device=' "$d"
-  cat "$d/device"
-  [ -e "$d/vendor" ] && { printf '  vendor='; cat "$d/vendor"; }
-  [ -e "$d/modalias" ] && { printf '  modalias='; cat "$d/modalias"; }
-done
+section("device node")
+try:
+    st = os.stat("/dev/vsock")
+    print(f"/dev/vsock mode={oct(st.st_mode & 0o777)} rdev={os.major(st.st_rdev)},{os.minor(st.st_rdev)} uid={st.st_uid} gid={st.st_gid}")
+except OSError as e:
+    print(f"stat /dev/vsock: errno={e.errno} {e.strerror!r}")
 
-echo
-echo "== vsock modules =="
-lsmod 2>/dev/null | grep -i vsock || true
-find /sys/module -maxdepth 1 -iname '*vsock*' -print 2>/dev/null || true
+section("open and ioctl")
+try:
+    fd = os.open("/dev/vsock", os.O_RDONLY | os.O_CLOEXEC)
+    print(f"open: ok fd={fd}")
+    try:
+        cid = fcntl.ioctl(fd, IOCTL_VM_SOCKETS_GET_LOCAL_CID, 0)
+        print(f"IOCTL_VM_SOCKETS_GET_LOCAL_CID returned {cid}")
+    except OSError as e:
+        print(f"IOCTL_VM_SOCKETS_GET_LOCAL_CID: errno={e.errno} {e.strerror!r}")
+    os.close(fd)
+except OSError as e:
+    print(f"open: errno={e.errno} {e.strerror!r}")
 
-echo
-echo "== kernel config =="
-zcat /proc/config.gz 2>/dev/null | egrep 'CONFIG_(VSOCKETS|VIRTIO_VSOCKETS|VHOST_VSOCK|VMWARE_VMCI_VSOCKETS)' || true
-grep -E 'CONFIG_(VSOCKETS|VIRTIO_VSOCKETS|VHOST_VSOCK|VMWARE_VMCI_VSOCKETS)' /boot/config-$(uname -r) 2>/dev/null || true
-
-echo
-echo "== proc net vsock =="
-cat /proc/net/vsock 2>&1 || true
-
-echo
-echo "== python AF_VSOCK probe =="
-python3 - <<'PY'
-import socket, errno, os
-
+section("AF_VSOCK constants")
 print("AF_VSOCK:", getattr(socket, "AF_VSOCK", None))
 print("VMADDR_CID_HOST:", getattr(socket, "VMADDR_CID_HOST", None))
-try:
-    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    print("socket(): ok")
+print("VMADDR_CID_ANY:", getattr(socket, "VMADDR_CID_ANY", None))
+print("VMADDR_CID_LOCAL:", getattr(socket, "VMADDR_CID_LOCAL", None))
+
+if not hasattr(socket, "AF_VSOCK"):
+    raise SystemExit(0)
+
+section("socket creation")
+for typ_name, typ in [("SOCK_STREAM", socket.SOCK_STREAM), ("SOCK_DGRAM", socket.SOCK_DGRAM)]:
     try:
-        s.settimeout(1)
-        s.connect((socket.VMADDR_CID_HOST, 1))
-        print("connect host:1: ok")
+        s = socket.socket(socket.AF_VSOCK, typ)
+        print(f"{typ_name}: socket() ok")
+        s.close()
     except OSError as e:
-        print(f"connect host:1: errno={e.errno} {e.strerror!r}")
+        print(f"{typ_name}: socket() errno={e.errno} {e.strerror!r}")
+
+section("connect to host CID")
+for port in [1, 22, 80, 443, 8000, 8080, 50051]:
+    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        s.connect((socket.VMADDR_CID_HOST, port))
+        print(f"connect host:{port}: ok")
+    except OSError as e:
+        print(f"connect host:{port}: errno={e.errno} {e.strerror!r}")
     finally:
         s.close()
-except OSError as e:
-    print(f"socket(): errno={e.errno} {e.strerror!r}")
+
+section("bind/listen experiments")
+# These may succeed locally even without a useful transport, but no host can reach them.
+bind_tests = []
+if hasattr(socket, "VMADDR_CID_ANY"):
+    bind_tests.append(("ANY", socket.VMADDR_CID_ANY, 12345))
+if hasattr(socket, "VMADDR_CID_LOCAL") and socket.VMADDR_CID_LOCAL is not None:
+    bind_tests.append(("LOCAL", socket.VMADDR_CID_LOCAL, 12346))
+
+if not bind_tests:
+    print("No VMADDR_CID_ANY/LOCAL constants available for bind tests")
+
+for label, cid, port in bind_tests:
+    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    try:
+        s.bind((cid, port))
+        print(f"bind {label} cid={cid} port={port}: ok")
+        try:
+            s.listen(1)
+            print(f"listen {label} port={port}: ok")
+        except OSError as e:
+            print(f"listen {label} port={port}: errno={e.errno} {e.strerror!r}")
+    except OSError as e:
+        print(f"bind {label} cid={cid} port={port}: errno={e.errno} {e.strerror!r}")
+    finally:
+        s.close()
 PY
 
-echo
-echo "== dmesg vsock lines =="
-dmesg 2>/dev/null | grep -iE 'vsock|virtio.*socket|virtio.*vsock' | tail -100 || true
+chmod +x /tmp/vsock_alone_probe.py
+/tmp/vsock_alone_probe.py
