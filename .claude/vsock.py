@@ -1,24 +1,35 @@
-import socket, errno
+#!/usr/bin/env python3
+import socket
+import errno
+import time
 
-ports = [
-    22, 80, 443, 2024, 2375, 2376, 5000, 5001,
-    5432, 6379, 8000, 8080, 8443, 9000, 9090, 50051
-]
+HOST_CID = 2  # VMADDR_CID_HOST on Linux
+TIMEOUT = 0.15
+
+ports = list(range(1, 2048)) + [2024, 8000, 8080, 9000, 10250, 5000, 2375]
+seen = set()
 
 for port in ports:
+    if port in seen:
+        continue
+    seen.add(port)
+
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    s.settimeout(0.5)
+    s.settimeout(TIMEOUT)
     try:
-        s.connect((socket.VMADDR_CID_HOST, port))
-        print(f"[+] vsock host CID 2 port {port}: connected")
+        s.connect((HOST_CID, port))
+        print(f"[+] open vsock port {port}")
+        # Optional ultra-safe banner read:
+        s.settimeout(0.25)
         try:
-            s.sendall(b"\n")
             data = s.recv(128)
-            print(f"    recv: {data!r}")
-        except Exception as e:
-            print(f"    connected, no banner/read error: {e}")
+            if data:
+                print(f"    banner: {data!r}")
+        except Exception:
+            pass
     except OSError as e:
-        if e.errno not in (errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETUNREACH):
-            print(f"[?] port {port}: {type(e).__name__}: {e}")
+        # Common: ECONNREFUSED, ETIMEDOUT, ENODEV, EHOSTUNREACH
+        pass
     finally:
         s.close()
+    time.sleep(0.01)
