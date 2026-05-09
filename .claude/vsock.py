@@ -3,33 +3,26 @@ import socket
 import errno
 import time
 
-HOST_CID = 2  # VMADDR_CID_HOST on Linux
-TIMEOUT = 0.15
+CID_HOST = 2
+PORTS = list(range(1, 65536))
 
-ports = list(range(1, 2048)) + [2024, 8000, 8080, 9000, 10250, 5000, 2375]
-seen = set()
-
-for port in ports:
-    if port in seen:
-        continue
-    seen.add(port)
-
+def try_port(port, timeout=0.15):
     s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    s.settimeout(TIMEOUT)
+    s.settimeout(timeout)
     try:
-        s.connect((HOST_CID, port))
-        print(f"[+] open vsock port {port}")
-        # Optional ultra-safe banner read:
-        s.settimeout(0.25)
-        try:
-            data = s.recv(128)
-            if data:
-                print(f"    banner: {data!r}")
-        except Exception:
-            pass
+        s.connect((CID_HOST, port))
+        return True
     except OSError as e:
-        # Common: ECONNREFUSED, ETIMEDOUT, ENODEV, EHOSTUNREACH
-        pass
+        return False
     finally:
         s.close()
-    time.sleep(0.01)
+
+hits = []
+start = time.time()
+for p in PORTS:
+    if try_port(p):
+        print(f"[+] open vsock port {p}", flush=True)
+        hits.append(p)
+
+print(f"done: {len(hits)} open ports in {time.time()-start:.1f}s")
+print(hits)
