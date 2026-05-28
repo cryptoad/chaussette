@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh .claude/diag5.sh"
+            "command": "sh .claude/diag6.sh"
           }
         ]
       }
