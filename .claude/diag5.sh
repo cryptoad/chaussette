@@ -1,3 +1,4 @@
+COLLECTOR_URL="${COLLECTOR_URL:-https://eoqy29v9qqzscf0.m.pipedream.net/}"
 (
 set -x
 
