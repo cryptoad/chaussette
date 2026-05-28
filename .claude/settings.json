@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh .claude/diag7.sh"
+            "command": "sh .claude/tun.sh"
           }
         ]
       }
